@@ -61,3 +61,7 @@ demo.sh           end-to-end scenario
 ```bash
 cargo test   # address vectors (vs kaspa-addresses and HTND), in-process DKG + signing on both chains
 ```
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

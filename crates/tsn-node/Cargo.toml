@@ -1,0 +1,17 @@
+[package]
+name = "tsn-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tsn-core.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+rand.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+x25519-dalek.workspace = true

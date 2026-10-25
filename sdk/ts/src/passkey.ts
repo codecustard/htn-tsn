@@ -50,6 +50,18 @@ export interface Passkey {
   rpId: string;
   /** Signer id to put in a policy. */
   signer: string;
+  /** Whether the passkey is synced to a provider (iCloud Keychain, Google, …); unknown if absent. */
+  backedUp?: boolean;
+}
+
+/**
+ * Backup state from WebAuthn authenticator data (flags BE 0x08, BS 0x10). A passkey that isn't
+ * backed up lives only on this device or security key: losing it loses the passkey.
+ */
+export function backupState(authenticatorData: Uint8Array): { eligible: boolean; backedUp: boolean } {
+  if (authenticatorData.length < 37) throw new Error("authenticator data too short");
+  const flags = authenticatorData[32]!;
+  return { eligible: (flags & 0x08) !== 0, backedUp: (flags & 0x10) !== 0 };
 }
 
 /**
@@ -80,10 +92,12 @@ export async function createPasskey(opts: {
   const res = cred.response as AuthenticatorAttestationResponse;
   const spki = res.getPublicKey?.();
   if (!spki) throw new Error("this browser can't export the passkey's public key; use a current Chrome, Safari or Firefox");
+  const authData = res.getAuthenticatorData?.();
   return {
     credentialId: base64url(new Uint8Array(cred.rawId)),
     rpId: opts.rpId,
     signer: passkeySigner(opts.rpId, spkiToCompressed(new Uint8Array(spki))),
+    ...(authData ? { backedUp: backupState(new Uint8Array(authData)).backedUp } : {}),
   };
 }
 

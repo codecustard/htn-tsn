@@ -3,7 +3,7 @@ import { p256 } from "@noble/curves/nist.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, concatBytes, hexToBytes } from "../src/bytes.js";
 import { requestDigest } from "../src/digest.js";
-import { base64url, fromBase64url, passkeySigner, softPasskey, spkiToCompressed } from "../src/passkey.js";
+import { backupState, base64url, fromBase64url, passkeySigner, softPasskey, spkiToCompressed } from "../src/passkey.js";
 import { newPolicyRequest, normalizePolicy, policyPath } from "../src/policy.js";
 import type { Policy, Tx } from "../src/types.js";
 import { readFileSync } from "node:fs";
@@ -46,5 +46,14 @@ describe("passkeys", () => {
     expect(ad[32]! & 0x05).toBe(0x05);
     const pub = hexToBytes(pk.signer.split(":")[2]!);
     expect(p256.verify(hexToBytes(a.sig), concatBytes(ad, sha256(cd)), pub, { format: "der" })).toBe(true);
+  });
+
+  it("reads the backup flags", () => {
+    const pk = softPasskey("localhost", "http://localhost:8080");
+    const at = (flags: number) => backupState(pk.assert(new Uint8Array(32), flags).authenticatorData);
+    expect(at(0x05)).toEqual({ eligible: false, backedUp: false }); // device-bound (security key)
+    expect(at(0x0d)).toEqual({ eligible: true, backedUp: false }); // syncable, not synced yet
+    expect(at(0x1d)).toEqual({ eligible: true, backedUp: true }); // synced passkey
+    expect(() => backupState(new Uint8Array(10))).toThrow();
   });
 });

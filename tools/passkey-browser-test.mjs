@@ -15,14 +15,17 @@ const browser = await chromium.launch();
 let failed = false;
 const check = (ok, what) => { console.log(`${ok ? "ok  " : "FAIL"} ${what}`); if (!ok) failed = true; };
 
-async function device(name, credential) {
+async function device(name, credential, synced = false) {
   const ctx = await browser.newContext(); // fresh storage = another device
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`${name} pageerror:`, e.message));
   const cdp = await ctx.newCDPSession(page);
   await cdp.send("WebAuthn.enable");
   const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
-    options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
+    options: {
+      protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true,
+      defaultBackupEligibility: synced, defaultBackupState: synced,
+    },
   });
   if (credential) await cdp.send("WebAuthn.addCredential", { authenticatorId, credential }); // the synced passkey
   await page.goto(URL_);
@@ -35,13 +38,14 @@ async function device(name, credential) {
 const text = (page, sel) => page.textContent(sel).then((t) => t.trim());
 
 // Device A: create the wallet.
-const A = await device("A");
+const A = await device("A", undefined, true);
 await A.page.fill("#limit", "20");
 await A.page.click("#create");
 await A.page.waitForSelector("#wallet-out.ok", { timeout: 10000 });
 const addr = await text(A.page, "#addr");
 check((await text(A.page, "#status")) === "Ready", `A: created, status Ready, address ${addr}`);
 console.log("     rules:", await text(A.page, "#rules"));
+check((await text(A.page, "#backup")).startsWith("Synced"), "A: synced passkey reported as backed up");
 const policy = await A.page.textContent("#policy-json");
 writeFileSync(D + "wallet.policy.json", policy);
 const cliAddr = execFileSync(`${BIN}/tsn`, ["address", "--public", D + "master.pub.json", "--policy", D + "wallet.policy.json", "--name", "wallet", "--network", "kaspa-testnet"]).toString().trim();
@@ -83,6 +87,15 @@ check(!(await C.page.isHidden("#confirm")), "C: deposit address hidden until con
 await C.page.click("#confirm");
 await C.page.waitForSelector("#wallet-out.ok", { timeout: 10000 });
 check((await text(C.page, "#addr")) === addr, "C: confirmed address matches A");
+
+// Device E: a device-bound passkey (e.g. a security key) gets a warning.
+const E = await device("E");
+await E.page.click("#create");
+await E.page.waitForSelector("#wallet-out.ok", { timeout: 10000 });
+check(
+  (await E.page.getAttribute("#backup", "class")) === "warn" && (await text(E.page, "#backup")).includes("only on this device"),
+  `E: device-bound passkey warned: ${(await text(E.page, "#backup")).slice(0, 60)}…`,
+);
 
 // Device D: a passkey that isn't a wallet passkey.
 const D2 = await device("D");

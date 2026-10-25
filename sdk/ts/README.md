@@ -75,6 +75,10 @@ await client.payWithPolicy({ policy, name: WALLET_KEY_NAME, network, to, amount,
   approve: async (req) => { const r = await approveWithWallet(req, wallet, key); wallet = r.wallet; return r.approval; } });
 ```
 
+`wallet.backedUp` says whether the passkey is synced to a provider (iCloud Keychain, Google, …),
+from the flags in its latest signature. Warn when it's `false`: losing that device loses the
+passkey, leaving only the recovery key. `backupState(authenticatorData)` reads the same flags.
+
 For other policies, `createPasskey` returns `{ credentialId, rpId, signer }`; put `signer` in any
 clause and approve with `approveWithPasskey(request, passkey)`. Keep such policies: unlike a wallet,
 they can't be rebuilt from the passkey.

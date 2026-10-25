@@ -114,6 +114,7 @@
         <dt>Address</dt><dd class="mono" id="addr"></dd>
         <dt>Balance</dt><dd id="balance">-</dd>
         <dt>Rules</dt><dd id="rules"></dd>
+        <dt>Backup</dt><dd id="backup"></dd>
       </dl>
       <div class="buttons">
         <button id="confirm" class="primary" hidden>Show deposit address</button>
@@ -286,6 +287,17 @@ function render() {
     s.limit ? `Face ID alone: up to ${coins(s.limit)} ${unit()} per payment` : "Face ID alone: any amount",
     s.recovery ? `Recovery key ${s.recovery.slice(0, 8)}…${s.recovery.slice(-4)} can also spend` : "No recovery key",
   ].join(". ") + ".";
+  const backup = $("backup");
+  if (wallet.backedUp === true) {
+    backup.textContent = "Synced to your passkey provider (iCloud Keychain, Google, …): survives losing this device.";
+    backup.className = "";
+  } else if (wallet.backedUp === false) {
+    backup.textContent = `This passkey is only on this device. If you lose it, ${s.recovery ? "only the recovery key can move the coins" : "the coins are lost (no recovery key)"}. Use a synced passkey for real funds.`;
+    backup.className = "warn";
+  } else {
+    backup.textContent = "Unknown (this browser didn't say). It updates at the next approval.";
+    backup.className = "";
+  }
   $("confirm").hidden = settled;
   if (!client) return;
   const cs = candidates();

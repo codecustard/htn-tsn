@@ -10,7 +10,7 @@
 import { p256 } from "@noble/curves/nist.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, concatBytes, hexToBytes } from "./bytes.js";
-import { approveWithPasskey, base64url, fromBase64url, createPasskey, passkeySigner, type Passkey } from "./passkey.js";
+import { approveWithPasskey, backupState, base64url, fromBase64url, createPasskey, passkeySigner, type Passkey } from "./passkey.js";
 import { signerId, type PolicyRequest } from "./policy.js";
 import type { Approval, Clause, Policy } from "./types.js";
 
@@ -35,6 +35,11 @@ export interface PasskeyWallet {
   settings: WalletSettings;
   /** Candidate public keys (compressed hex): two right after sign-in, one once resolved. */
   keys: string[];
+  /**
+   * Whether the passkey is synced to a provider (iCloud Keychain, Google, …), as of its last
+   * signature. If false, losing this device loses the passkey; only the recovery key remains.
+   */
+  backedUp?: boolean;
 }
 
 /**
@@ -149,7 +154,13 @@ async function assertion(rpId: string, credentialId?: string): Promise<Assertion
 export async function createWallet(opts: { rpId: string; rpName: string; userName: string; settings: WalletSettings }): Promise<PasskeyWallet> {
   const userId = encodeSettings(opts.settings);
   const pk = await createPasskey({ rpId: opts.rpId, rpName: opts.rpName, userName: opts.userName, userId, discoverable: true });
-  return { rpId: opts.rpId, credentialId: pk.credentialId, settings: opts.settings, keys: [pk.signer.split(":")[2]!] };
+  return {
+    rpId: opts.rpId,
+    credentialId: pk.credentialId,
+    settings: opts.settings,
+    keys: [pk.signer.split(":")[2]!],
+    ...(pk.backedUp !== undefined ? { backedUp: pk.backedUp } : {}),
+  };
 }
 
 /**
@@ -160,14 +171,23 @@ export async function signInWallet(opts: { rpId: string }): Promise<PasskeyWalle
   const a = await assertion(opts.rpId);
   if (!a.userHandle) throw new Error("this passkey has no wallet settings (not created as an htn-tsn wallet)");
   const settings = decodeSettings(a.userHandle);
-  return { rpId: opts.rpId, credentialId: a.credentialId, settings, keys: recoverPasskeyKeys(a.authenticatorData, a.clientDataJSON, a.signature) };
+  return {
+    rpId: opts.rpId,
+    credentialId: a.credentialId,
+    settings,
+    keys: recoverPasskeyKeys(a.authenticatorData, a.clientDataJSON, a.signature),
+    backedUp: backupState(a.authenticatorData).backedUp,
+  };
 }
 
 /** Browser: settle the wallet's key with one more signature (needed before showing a deposit address). */
 export async function confirmWallet(w: PasskeyWallet): Promise<PasskeyWallet> {
   if (w.keys.length === 1) return w;
   const a = await assertion(w.rpId, w.credentialId);
-  return narrowWallet(w, recoverPasskeyKeys(a.authenticatorData, a.clientDataJSON, a.signature));
+  return {
+    ...narrowWallet(w, recoverPasskeyKeys(a.authenticatorData, a.clientDataJSON, a.signature)),
+    backedUp: backupState(a.authenticatorData).backedUp,
+  };
 }
 
 /**
@@ -186,7 +206,7 @@ export async function approveWithWallet(
     hexToBytes(approval.client_data_json!),
     hexToBytes(approval.sig),
   );
-  const wallet = narrowWallet(w, recovered);
+  const wallet = { ...narrowWallet(w, recovered), backedUp: backupState(hexToBytes(approval.authenticator_data!)).backedUp };
   if (wallet.keys.length !== 1 || wallet.keys[0] !== key) throw new Error("this passkey doesn't control that address");
   return { approval, wallet };
 }

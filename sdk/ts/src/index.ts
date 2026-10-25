@@ -22,6 +22,7 @@ export {
   createPasskey,
   approveWithPasskey,
   softPasskey,
+  backupState,
   base64url,
   fromBase64url,
   type Passkey,

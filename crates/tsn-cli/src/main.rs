@@ -2,7 +2,7 @@
 //! picks signers and aggregates, but never sees a secret share and cannot make nodes sign
 //! anything the owner and node policy don't allow.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
 use rand::{rngs::OsRng, RngCore};
@@ -19,6 +19,7 @@ use tsn_core::{
     chain::{self, Network, Tx, TxInput, TxOutput},
     derive,
     frost::keys::PublicKeyPackage,
+    policy::Policy,
     proto::*,
 };
 
@@ -57,12 +58,25 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Validate a policy file and print its id, key path and addresses.
+    PolicyInfo {
+        #[arg(long)]
+        public: PathBuf,
+        #[arg(long)]
+        policy: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
     /// Print the address of OWNER's key NAME. Computed offline from the master public key.
     Address {
         #[arg(long)]
         public: PathBuf,
-        #[arg(long)]
-        owner: PathBuf,
+        /// Owner key file (for owner/<pubkey>/<name> keys).
+        #[arg(long, required_unless_present = "policy")]
+        owner: Option<PathBuf>,
+        /// Policy file (for policy/<id>/<name> keys) instead of --owner.
+        #[arg(long, conflicts_with = "owner")]
+        policy: Option<PathBuf>,
         #[arg(long)]
         name: String,
         #[arg(long)]
@@ -80,8 +94,12 @@ enum Cmd {
         #[arg(long, default_value = "master")]
         key_id: String,
         /// Key that signs the request.
-        #[arg(long)]
-        owner: PathBuf,
+        /// Owner key file (for owner/<pubkey>/<name> keys).
+        #[arg(long, required_unless_present = "policy")]
+        owner: Option<PathBuf>,
+        /// Policy file (for policy/<id>/<name> keys) instead of --owner.
+        #[arg(long, conflicts_with = "owner")]
+        policy: Option<PathBuf>,
         /// Owner named in the derivation path (defaults to --owner). Set differently to test impersonation.
         #[arg(long)]
         path_owner: Option<PathBuf>,
@@ -98,6 +116,9 @@ enum Cmd {
         /// Comma-separated node ids to use; default = any live nodes, retrying around bad ones.
         #[arg(long)]
         signers: Option<String>,
+        /// Owner key file of an approving signer (repeatable; policy keys).
+        #[arg(long = "approver")]
+        approvers: Vec<PathBuf>,
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -105,8 +126,12 @@ enum Cmd {
     Balance {
         #[arg(long)]
         public: PathBuf,
-        #[arg(long)]
-        owner: PathBuf,
+        /// Owner key file (for owner/<pubkey>/<name> keys).
+        #[arg(long, required_unless_present = "policy")]
+        owner: Option<PathBuf>,
+        /// Policy file (for policy/<id>/<name> keys) instead of --owner.
+        #[arg(long, conflicts_with = "owner")]
+        policy: Option<PathBuf>,
         #[arg(long)]
         name: String,
         #[arg(long)]
@@ -123,8 +148,12 @@ enum Cmd {
         public: PathBuf,
         #[arg(long, default_value = "master")]
         key_id: String,
-        #[arg(long)]
-        owner: PathBuf,
+        /// Owner key file (for owner/<pubkey>/<name> keys).
+        #[arg(long, required_unless_present = "policy")]
+        owner: Option<PathBuf>,
+        /// Policy file (for policy/<id>/<name> keys) instead of --owner.
+        #[arg(long, conflicts_with = "owner")]
+        policy: Option<PathBuf>,
         #[arg(long)]
         name: String,
         #[arg(long)]
@@ -139,6 +168,9 @@ enum Cmd {
         all: bool,
         #[arg(long)]
         api: Option<String>,
+        /// Owner key file of an approving signer (repeatable; policy keys).
+        #[arg(long = "approver")]
+        approvers: Vec<PathBuf>,
         /// Fee rate in sompi per gram of mass (default: API estimate, else chain minimum).
         #[arg(long)]
         feerate: Option<f64>,
@@ -174,6 +206,47 @@ fn load_owner(p: &PathBuf) -> Result<SigningKey> {
 
 fn load_public(p: &PathBuf) -> Result<PublicKeyPackage> {
     Ok(serde_json::from_slice(&std::fs::read(p).with_context(|| format!("reading {}", p.display()))?)?)
+}
+
+fn load_policy(p: &PathBuf) -> Result<Policy> {
+    let policy: Policy =
+        serde_json::from_slice(&std::fs::read(p).with_context(|| format!("reading {}", p.display()))?)?;
+    policy.validate()?;
+    Ok(policy)
+}
+
+/// Key path for `--owner` or `--policy` plus `--name`.
+fn key_path(owner: Option<&PathBuf>, policy: Option<&PathBuf>, name: &str) -> Result<(String, Option<Policy>)> {
+    match (owner, policy) {
+        (Some(o), None) => Ok((auth::owner_path(&load_owner(o)?.verifying_key(), name), None)),
+        (None, Some(p)) => {
+            let policy = load_policy(p)?;
+            Ok((policy.path(name)?, Some(policy)))
+        }
+        _ => bail!("give --owner or --policy"),
+    }
+}
+
+/// Owner signature for owner keys; approvals from `approvers` for policy keys.
+fn authorization(
+    owner: Option<&PathBuf>,
+    policy: Option<&Policy>,
+    approvers: &[PathBuf],
+    key_id: &str,
+    path: &str,
+    tx: &Tx,
+) -> Result<auth::Authorization> {
+    match policy {
+        Some(policy) => {
+            let keys = approvers.iter().map(load_owner).collect::<Result<Vec<_>>>()?;
+            ensure!(!keys.is_empty(), "policy keys need at least one --approver");
+            auth::authorize_policy(&keys, key_id, path, policy, tx, AUTH_TTL_SECS)
+        }
+        None => {
+            let owner = load_owner(owner.ok_or_else(|| anyhow!("--owner required"))?)?;
+            auth::authorize(&owner, key_id, path, tx, AUTH_TTL_SECS)
+        }
+    }
 }
 
 fn coins(sompi: u64) -> String {
@@ -229,11 +302,25 @@ async fn main() -> Result<()> {
             std::fs::write(&out, serde_json::to_vec_pretty(&f)?)?;
             println!("owner {}", f.ed25519_public);
         }
-        Cmd::Address { public, owner, name, network, script } => {
+        Cmd::PolicyInfo { public, policy, name } => {
+            let master = load_public(&public)?;
+            let policy = load_policy(&policy)?;
+            let path = policy.path(&name)?;
+            println!("policy id  {}", policy.id());
+            println!("path       {path}");
+            println!("canonical  {}", policy.canonical());
+            for network in
+                [Network::KaspaMainnet, Network::KaspaTestnet, Network::HoosatMainnet, Network::HoosatTestnet]
+            {
+                let (addr, _) = payment::path_address(master.verifying_key(), network, &path)?;
+                println!("{:<11}{addr}", network.prefix());
+            }
+        }
+        Cmd::Address { public, owner, policy, name, network, script } => {
             let network = Network::parse(&network)?;
             let master = load_public(&public)?;
-            let (_, addr, spk) =
-                payment::key_address(master.verifying_key(), network, &load_owner(&owner)?.verifying_key(), &name)?;
+            let (path, _) = key_path(owner.as_ref(), policy.as_ref(), &name)?;
+            let (addr, spk) = payment::path_address(master.verifying_key(), network, &path)?;
             println!("{}", if script { hex::encode(spk) } else { addr });
         }
         Cmd::Sign {
@@ -241,6 +328,8 @@ async fn main() -> Result<()> {
             public,
             key_id,
             owner,
+            policy,
+            approvers,
             path_owner,
             name,
             network,
@@ -253,12 +342,11 @@ async fn main() -> Result<()> {
             let network = Network::parse(&network)?;
             let client = NodeClient::new(Registry::load(&registry)?);
             let public = load_public(&public)?;
-            let owner = load_owner(&owner)?;
-            let path_owner_key = match &path_owner {
-                Some(p) => load_owner(p)?.verifying_key(),
-                None => owner.verifying_key(),
+            let (path, policy) = match &path_owner {
+                // Impersonation test: the path names one owner, the request is signed by another.
+                Some(p) => (auth::owner_path(&load_owner(p)?.verifying_key(), &name), None),
+                None => key_path(owner.as_ref(), policy.as_ref(), &name)?,
             };
-            let path = auth::owner_path(&path_owner_key, &name);
             let xonly = derive::child_xonly(public.verifying_key(), &path)?;
             let from = address::encode(network.prefix(), address::VERSION_PUBKEY, &xonly);
             let fee = 10_000;
@@ -281,7 +369,7 @@ async fn main() -> Result<()> {
                 lock_time: 0,
             };
             println!("from   {from}\nto     {to}\namount {amount} sompi (change {change}, fee {fee})");
-            let authz = auth::authorize(&owner, &key_id, &path, &tx, AUTH_TTL_SECS)?;
+            let authz = authorization(owner.as_ref(), policy.as_ref(), &approvers, &key_id, &path, &tx)?;
             let signers = parse_signers(signers.as_deref())?;
             client.sign_inputs(&key_id, &path, &authz, &public, &mut tx, signers.as_deref(), &print_line).await?;
             chain::verify_signed(&tx)?;
@@ -298,11 +386,11 @@ async fn main() -> Result<()> {
                 println!("signed tx -> {}", out.display());
             }
         }
-        Cmd::Balance { public, owner, name, network, api } => {
+        Cmd::Balance { public, owner, policy, name, network, api } => {
             let network = Network::parse(&network)?;
             let master = load_public(&public)?;
-            let (_, addr, _) =
-                payment::key_address(master.verifying_key(), network, &load_owner(&owner)?.verifying_key(), &name)?;
+            let (path, _) = key_path(owner.as_ref(), policy.as_ref(), &name)?;
+            let (addr, _) = payment::path_address(master.verifying_key(), network, &path)?;
             let api = ChainApi::new(network, api)?;
             let utxos = api.utxos(&addr).await?;
             let total: u64 = utxos.iter().map(|u| u.entry.amount).sum();
@@ -321,6 +409,8 @@ async fn main() -> Result<()> {
             public,
             key_id,
             owner,
+            policy,
+            approvers,
             name,
             network,
             to,
@@ -336,18 +426,10 @@ async fn main() -> Result<()> {
             let network = Network::parse(&network)?;
             let client = NodeClient::new(Registry::load(&registry)?);
             let public = load_public(&public)?;
-            let owner = load_owner(&owner)?;
+            let (path, policy) = key_path(owner.as_ref(), policy.as_ref(), &name)?;
             let api = ChainApi::new(network, api)?;
             let amount = if all { Amount::All } else { Amount::Exact(amount.expect("clap enforces amount or --all")) };
-            let req = payment::Request {
-                network,
-                owner: owner.verifying_key(),
-                name,
-                to: to.clone(),
-                amount,
-                feerate,
-                max_fee,
-            };
+            let req = payment::Request { network, path, to: to.clone(), amount, feerate, max_fee };
             let p = payment::prepare(&api, public.verifying_key(), &req).await?;
             if p.skipped_young_utxos > 0 {
                 println!(
@@ -367,7 +449,7 @@ async fn main() -> Result<()> {
                 tx.inputs.len()
             );
 
-            let authz = auth::authorize(&owner, &key_id, &p.path, &tx, AUTH_TTL_SECS)?;
+            let authz = authorization(owner.as_ref(), policy.as_ref(), &approvers, &key_id, &p.path, &tx)?;
             let signers = parse_signers(signers.as_deref())?;
             client.sign_inputs(&key_id, &p.path, &authz, &public, &mut tx, signers.as_deref(), &print_line).await?;
             chain::verify_signed(&tx)?;

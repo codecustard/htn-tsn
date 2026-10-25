@@ -8,9 +8,10 @@
 //! Endpoints (JSON; 64-bit amounts are decimal strings):
 //!   GET  /healthz
 //!   GET  /v1/info
-//!   GET  /v1/address?owner=<ed25519 hex>&name=<name>&network=<network>
-//!   GET  /v1/balance?owner=..&name=..&network=..
-//!   POST /v1/tx/prepare  {owner, name, network, to, amount | all, feerate?, max_fee?}
+//!   GET  /v1/address?owner=<ed25519 hex>&name=<name>&network=<network>   (or ?path=<key path>)
+//!   GET  /v1/balance?owner=..&name=..&network=..                          (or ?path=..)
+//!   POST /v1/policy      {policy, name, network} -> policy id, path, address
+//!   POST /v1/tx/prepare  {owner, name | path, network, to, amount | all, feerate?, max_fee?}
 //!   POST /v1/tx/send     {path, tx, auth, broadcast?, signers?}
 
 use anyhow::{anyhow, bail, ensure, Result};
@@ -192,21 +193,35 @@ async fn info(State(app): State<Shared>) -> ApiResult {
 
 #[derive(Deserialize)]
 struct KeyQuery {
-    owner: String,
-    name: String,
+    owner: Option<String>,
+    name: Option<String>,
+    path: Option<String>,
     network: String,
+}
+
+/// The key path from either `path` or `owner` + `name`.
+fn resolve_path(owner: Option<&str>, name: Option<&str>, path: Option<&str>) -> Result<String> {
+    match (owner, name, path) {
+        (Some(o), Some(n), None) => Ok(auth::owner_path(&parse_owner(o)?, n)),
+        (None, None, Some(p)) => {
+            payment::validate_path(p)?;
+            Ok(p.to_string())
+        }
+        _ => bail!("give either owner and name, or path"),
+    }
 }
 
 async fn address(State(app): State<Shared>, Query(q): Query<KeyQuery>) -> ApiResult {
     let network = Network::parse(&q.network)?;
-    let (path, address, script) =
-        payment::key_address(app.public.verifying_key(), network, &parse_owner(&q.owner)?, &q.name)?;
+    let path = resolve_path(q.owner.as_deref(), q.name.as_deref(), q.path.as_deref())?;
+    let (address, script) = payment::path_address(app.public.verifying_key(), network, &path)?;
     Ok(Json(json!({ "network": q.network, "path": path, "address": address, "script": hex::encode(script) })))
 }
 
 async fn balance(State(app): State<Shared>, Query(q): Query<KeyQuery>) -> ApiResult {
     let network = Network::parse(&q.network)?;
-    let (_, address, _) = payment::key_address(app.public.verifying_key(), network, &parse_owner(&q.owner)?, &q.name)?;
+    let path = resolve_path(q.owner.as_deref(), q.name.as_deref(), q.path.as_deref())?;
+    let (address, _) = payment::path_address(app.public.verifying_key(), network, &path)?;
     let utxos = app.api(network)?.utxos(&address).await?;
     let total: u64 = utxos.iter().map(|u| u.entry.amount).sum();
     let list: Vec<Value> = utxos
@@ -220,13 +235,35 @@ async fn balance(State(app): State<Shared>, Query(q): Query<KeyQuery>) -> ApiRes
             })
         })
         .collect();
-    Ok(Json(json!({ "address": address, "balance": total.to_string(), "utxos": list })))
+    Ok(Json(json!({ "address": address, "path": path, "balance": total.to_string(), "utxos": list })))
+}
+
+#[derive(Deserialize)]
+struct PolicyReq {
+    policy: tsn_core::policy::Policy,
+    name: String,
+    network: String,
+}
+
+/// Validates a policy and returns its id, path and address on `network`.
+async fn policy_address(State(app): State<Shared>, Json(r): Json<PolicyReq>) -> ApiResult {
+    let network = Network::parse(&r.network)?;
+    let path = r.policy.path(&r.name)?;
+    let (address, script) = payment::path_address(app.public.verifying_key(), network, &path)?;
+    Ok(Json(json!({
+        "policy_id": r.policy.id(),
+        "canonical": r.policy.canonical(),
+        "path": path,
+        "address": address,
+        "script": hex::encode(script),
+    })))
 }
 
 #[derive(Deserialize)]
 struct PrepareReq {
-    owner: String,
-    name: String,
+    owner: Option<String>,
+    name: Option<String>,
+    path: Option<String>,
     network: String,
     to: String,
     amount: Option<Value>,
@@ -249,8 +286,7 @@ async fn prepare(State(app): State<Shared>, Json(r): Json<PrepareReq>) -> ApiRes
     };
     let req = payment::Request {
         network,
-        owner: parse_owner(&r.owner)?,
-        name: r.name,
+        path: resolve_path(r.owner.as_deref(), r.name.as_deref(), r.path.as_deref())?,
         to: r.to,
         amount,
         feerate: r.feerate,
@@ -283,9 +319,9 @@ async fn send(State(app): State<Shared>, Json(r): Json<SendReq>) -> ApiResult {
 async fn send_inner(app: &App, r: SendReq) -> Result<Value> {
     let mut tx = r.tx;
     // Fail fast on what the nodes would refuse anyway.
-    auth::verify(&app.key_id, &r.path, &tx, &r.auth, auth::now_secs())?;
-    let xonly = tsn_core::derive::child_xonly(app.public.verifying_key(), &r.path)?;
-    let own_script = hex::encode(chain::p2pk_script(&xonly));
+    let (_, own_script_bytes) = payment::path_address(app.public.verifying_key(), tx.network, &r.path)?;
+    auth::verify(&app.key_id, &r.path, &tx, &r.auth, &own_script_bytes, auth::now_secs())?;
+    let own_script = hex::encode(&own_script_bytes);
     ensure!(!tx.inputs.is_empty(), "transaction has no inputs");
     ensure!(tx.inputs.iter().all(|i| i.script_pubkey == own_script), "every input must belong to {}", r.path);
     let fee = payment::implied_fee(&tx)?;
@@ -344,6 +380,7 @@ async fn main() -> Result<()> {
         .route("/v1/info", get(info))
         .route("/v1/address", get(address))
         .route("/v1/balance", get(balance))
+        .route("/v1/policy", post(policy_address))
         .route("/v1/tx/prepare", post(prepare))
         .route("/v1/tx/send", post(send))
         .layer(middleware::from_fn_with_state(app.clone(), guard))

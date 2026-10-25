@@ -1,10 +1,12 @@
 // Client for tsn-coordinator. The coordinator is untrusted: addresses are derived locally from a
 // pinned master public key, and every prepared transaction is checked before the owner signs it.
 
-import { keyAddress, type KeyAddress } from "./derive.js";
+import { encodeAddress, VERSION_PUBKEY } from "./bech32.js";
+import { childXOnly, keyAddress, type KeyAddress } from "./derive.js";
 import { checkIntent } from "./intent.js";
 import { authorize, type OwnerKey } from "./owner.js";
-import type { Authorization, Balance, Info, Network, Prepared, SendResult } from "./types.js";
+import { approve, newPolicyRequest, normalizePolicy, policyAddress, policyAuthorization } from "./policy.js";
+import { PREFIX, type Authorization, type Balance, type Info, type Network, type Policy, type Prepared, type SendResult } from "./types.js";
 
 export interface ClientOptions {
   /** Coordinator base URL, e.g. http://127.0.0.1:7100 */
@@ -37,6 +39,13 @@ export interface PayRequest {
   ttlSecs?: number;
   /** Set false to sign without broadcasting. Default true. */
   broadcast?: boolean;
+}
+
+/** Payment from a policy key, approved by the given signers (all on this machine). */
+export interface PolicyPayRequest extends Omit<PayRequest, "owner"> {
+  policy: Policy;
+  /** Keys of the approving signers; must satisfy some clause of the policy. */
+  approvers: OwnerKey[];
 }
 
 export class TsnClient {
@@ -96,18 +105,25 @@ export class TsnClient {
   }
 
   async balance(ownerPublicKey: string, name: string, network: Network): Promise<Balance> {
-    const q = new URLSearchParams({ owner: ownerPublicKey, name, network });
-    const b = await this.call<Balance>("GET", `/v1/balance?${q}`);
-    if (b.address !== this.address(ownerPublicKey, name, network).address) {
-      throw new Error("coordinator returned a balance for a different address");
-    }
+    return this.balanceOfPath(this.address(ownerPublicKey, name, network).path, network);
+  }
+
+  /** Address of a policy key, computed locally (no request). */
+  policyAddress(policy: Policy, name: string, network: Network): KeyAddress {
+    return policyAddress(this.masterPublicKey, policy, name, network);
+  }
+
+  async balanceOfPath(path: string, network: Network): Promise<Balance> {
+    const b = await this.call<Balance>("GET", `/v1/balance?${new URLSearchParams({ path, network })}`);
+    const expected = keyAddressForPath(this.masterPublicKey, path, network);
+    if (b.address !== expected) throw new Error("coordinator returned a balance for a different address");
     return b;
   }
 
-  async prepare(r: Omit<PayRequest, "owner" | "ttlSecs" | "broadcast"> & { ownerPublicKey: string }): Promise<Prepared> {
+  /** Unsigned payment from the key at `path` (owner/... or policy/...). */
+  async prepare(r: Omit<PayRequest, "owner" | "ttlSecs" | "broadcast" | "name"> & { path: string }): Promise<Prepared> {
     return this.call<Prepared>("POST", "/v1/tx/prepare", {
-      owner: r.ownerPublicKey,
-      name: r.name,
+      path: r.path,
       network: r.network,
       to: r.to,
       ...(r.amount === "all" ? { all: true } : { amount: r.amount.toString() }),
@@ -122,10 +138,29 @@ export class TsnClient {
 
   /** Prepare → check → authorize → threshold-sign (→ broadcast). */
   async pay(r: PayRequest): Promise<SendResult & { prepared: Prepared; fee: bigint }> {
-    await this.info();
     const key = this.address(r.owner.public, r.name, r.network);
+    return this.payFrom(key, r, (prepared) => authorize(r.owner, this.keyId, key.path, prepared.tx, r.ttlSecs ?? 600));
+  }
+
+  /** Same as `pay`, from a policy key, with approvals from `approvers`. */
+  async payWithPolicy(r: PolicyPayRequest): Promise<SendResult & { prepared: Prepared; fee: bigint }> {
+    const policy = normalizePolicy(r.policy);
+    const key = this.policyAddress(policy, r.name, r.network);
+    if (r.approvers.length === 0) throw new Error("policy payments need at least one approver");
+    return this.payFrom(key, r, (prepared) => {
+      const req = newPolicyRequest(this.keyId, key.path, policy, prepared.tx, r.ttlSecs ?? 600);
+      return policyAuthorization(req, r.approvers.map((a) => approve(a, req)));
+    });
+  }
+
+  private async payFrom(
+    key: KeyAddress,
+    r: Omit<PayRequest, "owner">,
+    authorizeFor: (p: Prepared) => Authorization,
+  ): Promise<SendResult & { prepared: Prepared; fee: bigint }> {
+    await this.info();
     const maxFee = r.maxFee ?? 10_000_000n;
-    const prepared = await this.prepare({ ...r, ownerPublicKey: r.owner.public, maxFee });
+    const prepared = await this.prepare({ ...r, path: key.path, maxFee });
     const fee = checkIntent(prepared, {
       network: r.network,
       keyId: this.keyId,
@@ -136,10 +171,13 @@ export class TsnClient {
       amount: r.amount,
       maxFee,
     });
-    const auth = authorize(r.owner, this.keyId, key.path, prepared.tx, r.ttlSecs ?? 600);
-    const result = await this.send(key.path, prepared, auth, r.broadcast ?? true);
+    const result = await this.send(key.path, prepared, authorizeFor(prepared), r.broadcast ?? true);
     const sameOutputs = JSON.stringify(result.tx.outputs) === JSON.stringify(prepared.tx.outputs);
     if (!sameOutputs) throw new Error("coordinator returned a transaction with different outputs");
     return { ...result, prepared, fee };
   }
+}
+
+function keyAddressForPath(master: string, path: string, network: Network): string {
+  return encodeAddress(PREFIX[network], VERSION_PUBKEY, childXOnly(master, path));
 }

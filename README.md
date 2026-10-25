@@ -9,7 +9,7 @@ sign transactions only when the owner requests it and every node's policy allows
 - **Protocol:** FROST, 3-of-5, secp256k1 BIP340 (Zcash Foundation `frost-secp256k1-tr` 3.0)
 - **Key setup:** dealerless DKG; round-2 shares sealed node-to-node (X25519 + ChaCha20-Poly1305)
 - **Keys:** path-derived child keys (`owner/<ed25519 pubkey>/<name>`), addresses computable offline
-- **Checks per node:** owner signature, input ownership, spend cap, own sighash, single-use nonces
+- **Checks per node:** owner signature or policy rules, input ownership, spend cap, own sighash, single-use nonces
 - **Robustness:** identifiable abort — a node sending a bad share is named and routed around
 
 ## Run the demo
@@ -29,6 +29,7 @@ The demo starts 5 nodes (node 2 is deliberately byzantine), runs DKG, derives ad
 | Attacker signs for alice's path | Nodes refuse (owner signature) |
 | Only 2 signers | Nodes refuse (threshold) |
 | `tsn send` against a mock API (needs python3) | Picks 2 UTXOs, computes the fee, signs each input, "broadcasts" |
+| Policy keys: protected hot wallet, escrow | Allowed spends sign; wrong destination, missing approver or early refund are refused by the nodes |
 | SDK → `tsn-coordinator` → nodes (needs npm) | Pays via the HTTP service; SDK checks the transaction before the owner signs |
 
 ## What "valid" means here
@@ -70,6 +71,34 @@ to send more than 100 coins outside the key's own address per request (`--max-ex
 folders, loses every coin sent to its addresses. `demo.sh` uses a separate folder that it wipes on
 every run, so never send real funds to demo addresses.
 
+## Policy keys
+
+A policy key is controlled by published rules instead of one owner key. Its path is
+`policy/<hash of the rules>/<name>`, so the rules are fixed when the address is created, and every
+node checks them before signing. A spend is allowed if any clause passes; a clause can require
+k-of-m approvals (`signers`), a not-before time (`after`, Unix seconds), allowed destinations
+(`only_to`; change back to the key is always allowed) and a per-transaction cap (`max_per_tx`).
+
+```json
+{"version": 1, "clauses": [
+  {"signers": {"k": 1, "of": ["ed25519:<server>"]}, "only_to": ["kaspa:<exchange>"], "max_per_tx": "5000000000"},
+  {"signers": {"k": 2, "of": ["ed25519:<server>", "ed25519:<ops>"]}}
+]}
+```
+
+A hacked server holding the `server` key can then only pay the exchange, 50 KAS at a time.
+
+```bash
+tsn policy-info --public P --policy hot.json --name hot           # id, path, addresses
+tsn send ... --policy hot.json --name hot --approver server.json --to ... --amount ...
+```
+
+Templates: team treasury (`k` of the team's keys), escrow (2 of buyer/seller/arbiter, or the buyer
+alone `after` a deadline), vesting (beneficiary `after` a date), recovery (owner, or a recovery key
+`after` a date). Not yet: daily limits and announce-then-wait delays, which need state shared
+across nodes. In the SDK: `client.payWithPolicy({ policy, name, approvers, ... })`, or
+`newPolicyRequest` + `approve` when approvers are on different machines.
+
 ## Signing service for apps
 
 `tsn-coordinator` is an HTTP API in front of the nodes; `sdk/ts` is the TypeScript client.
@@ -88,7 +117,8 @@ const { txid } = await client.pay({ owner, name: "main", network: "kaspa-testnet
 | Endpoint | Does |
 | --- | --- |
 | `GET /v1/info` | Threshold, master public key, networks, fee cap |
-| `GET /v1/address`, `GET /v1/balance` | Address and UTXOs of `owner`/`name` on `network` |
+| `GET /v1/address`, `GET /v1/balance` | Address and UTXOs of `owner`+`name` (or any key `path`) on `network` |
+| `POST /v1/policy` | Validates a policy; returns its id, path and address |
 | `POST /v1/tx/prepare` | Coin selection and fee; returns the unsigned transaction |
 | `POST /v1/tx/send` | With the owner's authorization: FROST across the nodes, verify, broadcast |
 | `GET /healthz` | Live nodes vs threshold |

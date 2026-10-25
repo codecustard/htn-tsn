@@ -17,8 +17,8 @@ pub const HOOSAT_MIN_INPUT_AGE_DAA: u64 = 1000;
 
 pub struct Request {
     pub network: Network,
-    pub owner: OwnerKey,
-    pub name: String,
+    /// Key path: `owner/<pubkey>/<name>` or `policy/<id>/<name>`.
+    pub path: String,
     pub to: String,
     pub amount: Amount,
     /// Sompi per gram; `None` = the API's estimate, else the chain's minimum.
@@ -42,6 +42,22 @@ pub struct Prepared {
     pub skipped_young_utxos: usize,
 }
 
+/// Checks a key path: `owner/<ed25519 hex>/<name>` or `policy/<id>/<name>`.
+pub fn validate_path(path: &str) -> Result<()> {
+    if path.starts_with("policy/") {
+        tsn_core::policy::parse_path(path).map(|_| ())
+    } else {
+        auth::path_owner(path).map(|_| ())
+    }
+}
+
+/// Address and P2PK script of the key at `path` under `master`, computed offline.
+pub fn path_address(master: &VerifyingKey, network: Network, path: &str) -> Result<(String, Vec<u8>)> {
+    validate_path(path)?;
+    let xonly = derive::child_xonly(master, path)?;
+    Ok((address::encode(network.prefix(), address::VERSION_PUBKEY, &xonly), chain::p2pk_script(&xonly)))
+}
+
 /// Address and P2PK script of `owner/name` under `master`, computed offline.
 pub fn key_address(
     master: &VerifyingKey,
@@ -50,13 +66,14 @@ pub fn key_address(
     name: &str,
 ) -> Result<(String, String, Vec<u8>)> {
     let path = auth::owner_path(owner, name);
-    let xonly = derive::child_xonly(master, &path)?;
-    Ok((path, address::encode(network.prefix(), address::VERSION_PUBKEY, &xonly), chain::p2pk_script(&xonly)))
+    let (addr, script) = path_address(master, network, &path)?;
+    Ok((path, addr, script))
 }
 
 /// Fetches the key's UTXOs, selects coins, prices the fee and returns the unsigned transaction.
 pub async fn prepare(api: &ChainApi, master: &VerifyingKey, req: &Request) -> Result<Prepared> {
-    let (path, from, own_script) = key_address(master, req.network, &req.owner, &req.name)?;
+    let path = req.path.clone();
+    let (from, own_script) = path_address(master, req.network, &path)?;
     let mut utxos = api.utxos(&from).await?;
     utxos.retain(|u| {
         u.entry.script_public_key.version == 0

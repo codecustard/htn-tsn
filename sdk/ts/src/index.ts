@@ -4,4 +4,16 @@ export { tweak, childXOnly, p2pkScript, ownerPath, keyAddress, type KeyAddress }
 export { requestDigest, validateRequestId } from "./digest.js";
 export { generateOwnerKey, ownerFromSecret, authorize, MAX_TTL_SECS, type OwnerKey } from "./owner.js";
 export { checkIntent, type Intent } from "./intent.js";
-export { TsnClient, type ClientOptions, type PayRequest } from "./client.js";
+export {
+  signerId,
+  canonicalJson,
+  normalizePolicy,
+  policyId,
+  policyPath,
+  policyAddress,
+  newPolicyRequest,
+  approve,
+  policyAuthorization,
+  type PolicyRequest,
+} from "./policy.js";
+export { TsnClient, type ClientOptions, type PayRequest, type PolicyPayRequest } from "./client.js";

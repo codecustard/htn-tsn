@@ -231,9 +231,11 @@ async fn sign_commit(State(n): State<Shared>, Json(req): Json<CommitReq>) -> Api
 }
 
 fn check_request(n: &Node, req: &ShareReq, key: &StoredKey) -> Result<[u8; 32]> {
-    // 1. Owner authorization: signed by the path's owner, unexpired, and not overused.
+    // 1. Authorization: the path's owner, or a passing clause of the path's policy; unexpired
+    //    and not overused.
     let now = auth::now_secs();
-    auth::verify(&req.key_id, &req.path, &req.tx, &req.auth, now)?;
+    let own_script = chain::p2pk_script(&derive::child_xonly(key.public_key_package.verifying_key(), &req.path)?);
+    auth::verify(&req.key_id, &req.path, &req.tx, &req.auth, &own_script, now)?;
     {
         let mut requests = n.requests.lock().unwrap();
         requests.retain(|_, (_, exp)| *exp >= now);
@@ -242,13 +244,12 @@ fn check_request(n: &Node, req: &ShareReq, key: &StoredKey) -> Result<[u8; 32]> 
         entry.0 += 1;
     }
     // 2. The input must be owned by this path's derived key.
-    let own_script = chain::p2pk_script(&derive::child_xonly(key.public_key_package.verifying_key(), &req.path)?);
     let input = req.tx.inputs.get(req.input_index).ok_or_else(|| anyhow!("input index out of range"))?;
     ensure!(hex::decode(&input.script_pubkey)? == own_script, "input {} is not owned by {}", req.input_index, req.path);
-    // 3. Policy.
+    // 3. This node's own spend cap, on top of anything the key's policy allows.
     let external = chain::external_spend(&req.tx, &own_script)?;
     if external > n.max_external_spend {
-        bail!("policy: sends {external} sompi externally, limit is {}", n.max_external_spend);
+        bail!("node spend cap: sends {external} sompi externally, limit is {}", n.max_external_spend);
     }
     // 4. Sign only what we computed ourselves.
     let sighash = chain::sighash(&req.tx, req.input_index)?;

@@ -63,7 +63,7 @@ kill "${PIDS[4]}"; sleep 0.3
 "${SIGN[@]}" --owner "$DEMO/alice.json" --name treasury --network kaspa-testnet \
   --to "$BOB_KAS" --amount 500000000
 
-step "9. Policy: 200 KAS exceeds every node's 100 KAS limit"
+step "9. Node spend cap: 200 KAS exceeds every node's 100 KAS limit"
 expect_fail "${SIGN[@]}" --owner "$DEMO/alice.json" --name treasury --network kaspa-testnet \
   --to "$BOB_KAS" --amount 20000000000 --utxo-amount 30000000000 --signers 1,3,4
 
@@ -75,8 +75,38 @@ step "11. Two nodes are not enough"
 expect_fail "${SIGN[@]}" --owner "$DEMO/alice.json" --name treasury --network kaspa-testnet \
   --to "$BOB_KAS" --amount 100000000 --signers 1,3
 
+step "12. Policy keys: rules control the key, every node enforces them"
+pub() { grep -o '"ed25519_public": *"[0-9a-f]*"' "$1" | grep -o '[0-9a-f]\{64\}'; }
+for o in server ops buyer seller arbiter carol; do $BIN/tsn owner-new --out "$DEMO/$o.json" >/dev/null; done
+CAROL_KAS=$($BIN/tsn address --public "$DEMO/master.pub.json" --owner "$DEMO/carol.json" --name main --network kaspa-testnet)
+cat > "$DEMO/hot-wallet.policy.json" <<JSON
+{"version": 1, "clauses": [
+  {"signers": {"k": 1, "of": ["ed25519:$(pub "$DEMO/server.json")"]},
+   "only_to": ["$BOB_KAS"], "max_per_tx": "5000000000"},
+  {"signers": {"k": 2, "of": ["ed25519:$(pub "$DEMO/server.json")", "ed25519:$(pub "$DEMO/ops.json")"]}}
+]}
+JSON
+$BIN/tsn policy-info --public "$DEMO/master.pub.json" --policy "$DEMO/hot-wallet.policy.json" --name hot
+POL=($BIN/tsn sign --registry "$DEMO/registry.json" --public "$DEMO/master.pub.json" --network kaspa-testnet --amount 1000000000)
+echo "-- protected hot wallet: server alone may pay only bob (the 'exchange'), up to 50 KAS"
+"${POL[@]}" --policy "$DEMO/hot-wallet.policy.json" --name hot --approver "$DEMO/server.json" --to "$BOB_KAS" | tail -1
+expect_fail "${POL[@]}" --policy "$DEMO/hot-wallet.policy.json" --name hot --approver "$DEMO/server.json" --to "$CAROL_KAS"
+"${POL[@]}" --policy "$DEMO/hot-wallet.policy.json" --name hot --approver "$DEMO/server.json" --approver "$DEMO/ops.json" --to "$CAROL_KAS" | tail -1
+expect_fail "${POL[@]}" --policy "$DEMO/hot-wallet.policy.json" --name hot --approver "$DEMO/ops.json" --to "$BOB_KAS"
+DEADLINE=$(( $(date +%s) + 86400 ))
+cat > "$DEMO/escrow.policy.json" <<JSON
+{"version": 1, "clauses": [
+  {"signers": {"k": 2, "of": ["ed25519:$(pub "$DEMO/buyer.json")", "ed25519:$(pub "$DEMO/seller.json")", "ed25519:$(pub "$DEMO/arbiter.json")"]}},
+  {"signers": {"k": 1, "of": ["ed25519:$(pub "$DEMO/buyer.json")"]}, "after": $DEADLINE}
+]}
+JSON
+echo "-- escrow: any 2 of buyer/seller/arbiter, or the buyer alone after the deadline (tomorrow)"
+expect_fail "${POL[@]}" --policy "$DEMO/escrow.policy.json" --name deal-42 --approver "$DEMO/seller.json" --to "$CAROL_KAS"
+expect_fail "${POL[@]}" --policy "$DEMO/escrow.policy.json" --name deal-42 --approver "$DEMO/buyer.json" --to "$CAROL_KAS"
+"${POL[@]}" --policy "$DEMO/escrow.policy.json" --name deal-42 --approver "$DEMO/seller.json" --approver "$DEMO/arbiter.json" --to "$CAROL_KAS" | tail -1
+
 if command -v python3 >/dev/null; then
-  step "12. Real-payment path (tsn send) against a mock API: 2 UTXOs, coin selection, fee, broadcast"
+  step "13. Real-payment path (tsn send) against a mock API: 2 UTXOs, coin selection, fee, broadcast"
   for net in kaspa-testnet hoosat-mainnet; do
     ADDR=$($BIN/tsn address --public "$DEMO/master.pub.json" --owner "$DEMO/alice.json" --name treasury --network $net)
     SCRIPT=$($BIN/tsn address --public "$DEMO/master.pub.json" --owner "$DEMO/alice.json" --name treasury --network $net --script)
@@ -92,7 +122,7 @@ if command -v python3 >/dev/null; then
 fi
 
 if command -v python3 >/dev/null && command -v npm >/dev/null; then
-  step "13. App path: TypeScript SDK -> tsn-coordinator -> nodes (mock API)"
+  step "14. App path: TypeScript SDK -> tsn-coordinator -> nodes (mock API)"
   if [ ! -d sdk/ts/node_modules ]; then (cd sdk/ts && npm ci --silent); fi
   (cd sdk/ts && npm run --silent build)
   ADDR=$($BIN/tsn address --public "$DEMO/master.pub.json" --owner "$DEMO/alice.json" --name treasury --network kaspa-testnet)
@@ -110,7 +140,7 @@ if command -v python3 >/dev/null && command -v npm >/dev/null; then
     TO="$BOB_KAS" AMOUNT=1000000000 OUT="$DEMO/sent-sdk.json" node sdk/ts/examples/pay.mjs
 fi
 
-step "14. Independent re-verification of the saved transactions"
+step "15. Independent re-verification of the saved transactions"
 $BIN/tsn verify --tx "$DEMO/signed-kaspa.json"
 $BIN/tsn verify --tx "$DEMO/signed-hoosat.json"
 for f in "$DEMO"/sent-*.json; do [ -f "$f" ] && $BIN/tsn verify --tx "$f"; done

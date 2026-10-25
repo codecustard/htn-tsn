@@ -12,6 +12,7 @@ use tsn_core::{
     chain::{Network, Tx, TxInput, TxOutput},
     derive,
     frost::VerifyingKey,
+    policy::{self, Clause, Policy, Signers},
 };
 
 fn master_hex(seed: u64) -> String {
@@ -94,7 +95,67 @@ fn vectors() -> Value {
     let digest = auth::request_digest("master", &path, request_id, expires_at, &tx).unwrap();
     let signature = owner.sign(&digest);
 
+    let signer = |b: u8| policy::ed25519_signer(&SigningKey::from_bytes(&[b; 32]).verifying_key());
+    let exchange = address::encode("kaspatest", address::VERSION_PUBKEY, &[0x44u8; 32]);
+    let policies = [
+        // Protected hot wallet: server alone to the exchange (capped), or server + ops for anything.
+        Policy {
+            version: 1,
+            clauses: vec![
+                Clause {
+                    signers: Signers { k: 1, of: vec![signer(1)] },
+                    after: None,
+                    only_to: Some(vec![exchange.clone()]),
+                    max_per_tx: Some(9_007_199_254_740_993),
+                },
+                Clause {
+                    signers: Signers { k: 2, of: vec![signer(1), signer(2)] },
+                    after: None,
+                    only_to: None,
+                    max_per_tx: None,
+                },
+            ],
+        },
+        // Escrow: 2 of buyer, seller, arbiter; or the buyer alone after the deadline.
+        Policy {
+            version: 1,
+            clauses: vec![
+                Clause {
+                    signers: Signers { k: 2, of: vec![signer(11), signer(12), signer(13)] },
+                    after: None,
+                    only_to: None,
+                    max_per_tx: None,
+                },
+                Clause {
+                    signers: Signers { k: 1, of: vec![signer(11)] },
+                    after: Some(1_800_000_000),
+                    only_to: None,
+                    max_per_tx: None,
+                },
+            ],
+        },
+    ];
+    let master = master_hex(7);
+    let vk = VerifyingKey::deserialize(&hex::decode(&master).unwrap()).unwrap();
+    let policy_vectors: Vec<Value> = policies
+        .iter()
+        .map(|p| {
+            let path = p.path("vault").unwrap();
+            let xonly = derive::child_xonly(&vk, &path).unwrap();
+            json!({
+                "policy": p,
+                "canonical": p.canonical(),
+                "id": p.id(),
+                "name": "vault",
+                "path": path,
+                "master_public_key": master,
+                "kaspa_testnet_address": address::encode("kaspatest", address::VERSION_PUBKEY, &xonly),
+            })
+        })
+        .collect();
+
     json!({
+        "policies": policy_vectors,
         "addresses": addresses,
         "derivations": derivations,
         "authorization": {

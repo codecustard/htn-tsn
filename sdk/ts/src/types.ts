@@ -35,11 +35,38 @@ export interface Tx {
   lock_time: string;
 }
 
-/** The owner's approval of one transaction (all inputs, all retries) until it expires. */
+/** One clause of a policy: passes when all of its conditions hold. */
+export interface Clause {
+  signers: { k: number; of: string[] };
+  /** Unix time (seconds) from which the clause can pass. */
+  after?: number;
+  /** Allowed destinations (change back to the key is always allowed). */
+  only_to?: string[];
+  /** Most sompi that may leave the key per transaction (decimal string). */
+  max_per_tx?: string;
+}
+
+/** Rules controlling a policy key: a spend is allowed if any clause passes. */
+export interface Policy {
+  version: 1;
+  clauses: Clause[];
+}
+
+export interface Approval {
+  signer: string;
+  sig: string;
+}
+
+/**
+ * Approval of one transaction (all inputs, all retries) until it expires: the owner's
+ * signature for owner keys, or the policy plus signer approvals for policy keys.
+ */
 export interface Authorization {
   request_id: string;
   expires_at: number;
-  owner_sig: string;
+  owner_sig?: string;
+  approvals?: Approval[];
+  policy?: Policy;
 }
 
 export interface Prepared {

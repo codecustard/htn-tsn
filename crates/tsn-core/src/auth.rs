@@ -9,7 +9,10 @@
 //! transaction (every input and output), so it can't be reused for anything else. Replaying it
 //! can only produce more signatures over the same transaction, which spends the same UTXOs.
 
-use crate::chain::Tx;
+use crate::{
+    chain::Tx,
+    policy::{self, Approval, Policy},
+};
 use anyhow::{anyhow, bail, ensure, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::RngCore;
@@ -20,15 +23,26 @@ use sha2::{Digest, Sha256};
 pub const MAX_REQUEST_TTL_SECS: u64 = 3600;
 const DOMAIN: &[u8] = b"HTN-TSN/sign-request/v2";
 
-/// The owner's approval of one transaction, sent with every signing request.
+/// Approval of one transaction, sent with every signing request.
+///
+/// For `owner/...` keys: `owner_sig` is the owner's signature over [`request_digest`].
+/// For `policy/...` keys: `policy` is the full policy document and `approvals` holds one
+/// signature over the same digest from each approving signer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Authorization {
     /// 16 random bytes, lowercase hex.
     pub request_id: String,
     /// Unix time (seconds) after which nodes refuse it.
     pub expires_at: u64,
-    /// Owner's ed25519 signature over [`request_digest`], hex.
+    /// Owner's ed25519 signature over [`request_digest`], hex (owner keys).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub owner_sig: String,
+    /// Signer approvals (policy keys).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvals: Vec<Approval>,
+    /// The policy document whose id is in the path (policy keys).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<Policy>,
 }
 
 pub fn owner_path(owner: &VerifyingKey, name: &str) -> String {
@@ -109,19 +123,59 @@ pub fn validate_request_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Builds an authorization valid for `ttl_secs`.
+/// Builds an owner-key authorization valid for `ttl_secs`.
 pub fn authorize(owner: &SigningKey, key_id: &str, path: &str, tx: &Tx, ttl_secs: u64) -> Result<Authorization> {
     let request_id = new_request_id();
     let expires_at = now_secs() + ttl_secs.min(MAX_REQUEST_TTL_SECS);
     let digest = request_digest(key_id, path, &request_id, expires_at, tx)?;
-    Ok(Authorization { request_id, expires_at, owner_sig: hex::encode(owner.sign(&digest).to_bytes()) })
+    Ok(Authorization {
+        request_id,
+        expires_at,
+        owner_sig: hex::encode(owner.sign(&digest).to_bytes()),
+        approvals: vec![],
+        policy: None,
+    })
 }
 
-/// Node-side check: well-formed, unexpired, not valid for too long, and signed by the path's owner.
-pub fn verify(key_id: &str, path: &str, tx: &Tx, auth: &Authorization, now: u64) -> Result<()> {
+/// Builds a policy-key authorization with approvals from `signers`, valid for `ttl_secs`.
+pub fn authorize_policy(
+    signers: &[SigningKey],
+    key_id: &str,
+    path: &str,
+    policy: &Policy,
+    tx: &Tx,
+    ttl_secs: u64,
+) -> Result<Authorization> {
+    let request_id = new_request_id();
+    let expires_at = now_secs() + ttl_secs.min(MAX_REQUEST_TTL_SECS);
+    let digest = request_digest(key_id, path, &request_id, expires_at, tx)?;
+    let approvals = signers
+        .iter()
+        .map(|k| Approval {
+            signer: policy::ed25519_signer(&k.verifying_key()),
+            sig: hex::encode(k.sign(&digest).to_bytes()),
+        })
+        .collect();
+    Ok(Authorization { request_id, expires_at, owner_sig: String::new(), approvals, policy: Some(policy.clone()) })
+}
+
+/// Node-side check: well-formed, unexpired, not valid for too long, and approved as the key's
+/// path requires (its owner for `owner/...`, a passing clause for `policy/...`).
+/// `own_script` is the P2PK script of the key at `path`.
+pub fn verify(key_id: &str, path: &str, tx: &Tx, auth: &Authorization, own_script: &[u8], now: u64) -> Result<()> {
     ensure!(auth.expires_at >= now, "authorization expired");
     ensure!(auth.expires_at <= now + MAX_REQUEST_TTL_SECS + 60, "authorization valid for too long");
     let digest = request_digest(key_id, path, &auth.request_id, auth.expires_at, tx)?;
+    if path.starts_with("policy/") {
+        let (id, _) = policy::parse_path(path)?;
+        let p = auth.policy.as_ref().ok_or_else(|| anyhow!("policy key: request must include the policy"))?;
+        p.validate()?;
+        ensure!(p.id() == id, "policy does not match the key's path");
+        ensure!(auth.owner_sig.is_empty(), "policy keys take approvals, not an owner signature");
+        p.evaluate(tx, own_script, &auth.approvals, &digest, now)?;
+        return Ok(());
+    }
+    ensure!(auth.approvals.is_empty() && auth.policy.is_none(), "owner keys take an owner signature only");
     let owner = path_owner(path)?;
     let sig: [u8; 64] =
         hex::decode(&auth.owner_sig)?.try_into().map_err(|_| anyhow!("owner signature must be 64 bytes"))?;
@@ -160,19 +214,19 @@ mod tests {
         let tx = sample_tx();
         let a = authorize(&owner, "master", &path, &tx, 600).unwrap();
         let now = now_secs();
-        verify("master", &path, &tx, &a, now).unwrap();
+        verify("master", &path, &tx, &a, &[], now).unwrap();
         // Signature scripts don't affect the digest.
         let mut signed = tx.clone();
         signed.inputs[0].signature_script = "41".into();
-        verify("master", &path, &signed, &a, now).unwrap();
+        verify("master", &path, &signed, &a, &[], now).unwrap();
         // Anything else does.
         let mut other = tx.clone();
         other.outputs[0].amount += 1;
-        assert!(verify("master", &path, &other, &a, now).is_err());
-        assert!(verify("other-key", &path, &tx, &a, now).is_err());
-        assert!(verify("master", &path, &tx, &a, a.expires_at + 1).is_err());
+        assert!(verify("master", &path, &other, &a, &[], now).is_err());
+        assert!(verify("other-key", &path, &tx, &a, &[], now).is_err());
+        assert!(verify("master", &path, &tx, &a, &[], a.expires_at + 1).is_err());
         let mallory = SigningKey::from_bytes(&[9u8; 32]);
         let forged = authorize(&mallory, "master", &path, &tx, 600).unwrap();
-        assert!(verify("master", &path, &tx, &forged, now).is_err());
+        assert!(verify("master", &path, &tx, &forged, &[], now).is_err());
     }
 }

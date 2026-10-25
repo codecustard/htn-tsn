@@ -29,6 +29,27 @@ const result = await client.pay({
 console.log(result.txid);
 ```
 
+## Policy keys
+
+```ts
+import { signerId, type Policy } from "@htn-tsn/sdk";
+
+const policy: Policy = {
+  version: 1,
+  clauses: [
+    { signers: { k: 1, of: [signerId(server.public)] }, only_to: [exchange], max_per_tx: "5000000000" },
+    { signers: { k: 2, of: [signerId(server.public), signerId(ops.public)] } },
+  ],
+};
+
+const { address } = client.policyAddress(policy, "hot", "kaspa-mainnet");   // deposit here
+await client.payWithPolicy({ policy, name: "hot", network: "kaspa-mainnet", to: exchange, amount: 100_000_000n, approvers: [server] });
+```
+
+When approvers are on different machines: one party prepares (`client.prepare({ path, ... })`),
+creates `newPolicyRequest(...)`, and sends it to each approver, who runs `checkIntent` and returns
+`approve(theirKey, request)`; then `client.send(path, prepared, policyAuthorization(request, approvals))`.
+
 ## What the SDK checks
 
 The coordinator is untrusted, so the SDK never takes its word for anything that matters:
@@ -51,6 +72,8 @@ The coordinator is untrusted, so the SDK never takes its word for anything that 
 | `TsnClient.balance(ownerPub, name, network)` | UTXOs and balance |
 | `TsnClient.prepare(...)`, `checkIntent(...)`, `authorize(...)`, `TsnClient.send(...)` | The steps of `pay`, for custom flows |
 | `requestDigest(...)` | The bytes an owner signs (matches Rust; see `testdata/sdk-vectors.json`) |
+| `policyId`, `policyPath`, `policyAddress`, `normalizePolicy` | Policy keys, offline |
+| `TsnClient.payWithPolicy`, `newPolicyRequest`, `approve`, `policyAuthorization` | Spending from policy keys |
 
 Amounts are `bigint` in arguments and decimal strings in transactions, because JSON numbers lose
 precision above 2^53.

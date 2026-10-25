@@ -104,5 +104,73 @@
       "tweak": "6fedf777839d8f61ecdd03378c0dacd5be91356cae6bce2ed5e041181745d22f",
       "xonly": "4dcc7d33b1ed6a0332ce710ae42734946726f209d8365bf51c8ac3c58c58883c"
     }
+  ],
+  "policies": [
+    {
+      "canonical": "{\"clauses\":[{\"max_per_tx\":\"9007199254740993\",\"only_to\":[\"kaspatest:qpzyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygmtmcxuzq\"],\"signers\":{\"k\":1,\"of\":[\"ed25519:8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\"]}},{\"signers\":{\"k\":2,\"of\":[\"ed25519:8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\",\"ed25519:8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394\"]}}],\"version\":1}",
+      "id": "0e4b1fab264192ed7992aff54a07ede17b9e6e806629f547785d10400a2501dd",
+      "kaspa_testnet_address": "kaspatest:qql6pey6sayvnq7uhjs0jqagmq5vmnkuuz9399pqt5lnh2y6ptrtzcl7g888y",
+      "master_public_key": "025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+      "name": "vault",
+      "path": "policy/0e4b1fab264192ed7992aff54a07ede17b9e6e806629f547785d10400a2501dd/vault",
+      "policy": {
+        "clauses": [
+          {
+            "max_per_tx": "9007199254740993",
+            "only_to": [
+              "kaspatest:qpzyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygmtmcxuzq"
+            ],
+            "signers": {
+              "k": 1,
+              "of": [
+                "ed25519:8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+              ]
+            }
+          },
+          {
+            "signers": {
+              "k": 2,
+              "of": [
+                "ed25519:8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+                "ed25519:8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
+              ]
+            }
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "canonical": "{\"clauses\":[{\"signers\":{\"k\":2,\"of\":[\"ed25519:66be7e332c7a453332bd9d0a7f7db055f5c5ef1a06ada66d98b39fb6810c473a\",\"ed25519:0b513ad9b4924015ca0902ed079044d3ac5dbec2306f06948c10da8eb6e39f2d\",\"ed25519:91a28a0b74381593a4d9469579208926afc8ad82c8839b7644359b9eba9a4b3a\"]}},{\"after\":1800000000,\"signers\":{\"k\":1,\"of\":[\"ed25519:66be7e332c7a453332bd9d0a7f7db055f5c5ef1a06ada66d98b39fb6810c473a\"]}}],\"version\":1}",
+      "id": "d9c30af0f4fcf9e38ab1b969f564524be53d730755c2a713ebc634740b106cdc",
+      "kaspa_testnet_address": "kaspatest:qqsuhgaxkrq2c8xr68e6kkpxwl0df5l6mex6pq3hae556y8v8ja2wlxk5rl8z",
+      "master_public_key": "025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+      "name": "vault",
+      "path": "policy/d9c30af0f4fcf9e38ab1b969f564524be53d730755c2a713ebc634740b106cdc/vault",
+      "policy": {
+        "clauses": [
+          {
+            "signers": {
+              "k": 2,
+              "of": [
+                "ed25519:66be7e332c7a453332bd9d0a7f7db055f5c5ef1a06ada66d98b39fb6810c473a",
+                "ed25519:0b513ad9b4924015ca0902ed079044d3ac5dbec2306f06948c10da8eb6e39f2d",
+                "ed25519:91a28a0b74381593a4d9469579208926afc8ad82c8839b7644359b9eba9a4b3a"
+              ]
+            }
+          },
+          {
+            "after": 1800000000,
+            "signers": {
+              "k": 1,
+              "of": [
+                "ed25519:66be7e332c7a453332bd9d0a7f7db055f5c5ef1a06ada66d98b39fb6810c473a"
+              ]
+            }
+          }
+        ],
+        "version": 1
+      }
+    }
   ]
 }

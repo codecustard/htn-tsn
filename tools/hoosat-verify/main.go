@@ -2,6 +2,8 @@
 // HTND decodes the output addresses, computes the sighash, and executes every input script.
 // It shares no code with the Rust prototype, so a pass means the FROST signature is valid on Hoosat.
 //
+// 64-bit values are decimal strings in the JSON (see chain::u64_string).
+//
 // Usage: go run . <signed-tx.json>
 package main
 
@@ -22,23 +24,23 @@ import (
 type txInput struct {
 	PrevTxid        string `json:"prev_txid"`
 	Index           uint32 `json:"index"`
-	Amount          uint64 `json:"amount"`
+	Amount          uint64 `json:"amount,string"`
 	ScriptPubkey    string `json:"script_pubkey"`
-	Sequence        uint64 `json:"sequence"`
+	Sequence        uint64 `json:"sequence,string"`
 	SigOpCount      uint8  `json:"sig_op_count"`
 	SignatureScript string `json:"signature_script"`
 }
 
 type txOutput struct {
 	Address string `json:"address"`
-	Amount  uint64 `json:"amount"`
+	Amount  uint64 `json:"amount,string"`
 }
 
 type signedTx struct {
 	Network  string     `json:"network"`
 	Inputs   []txInput  `json:"inputs"`
 	Outputs  []txOutput `json:"outputs"`
-	LockTime uint64     `json:"lock_time"`
+	LockTime uint64     `json:"lock_time,string"`
 }
 
 func must(err error) {

@@ -1,0 +1,24 @@
+[package]
+name = "tsn-coord"
+description = "Coordinator for the htn-tsn threshold signing network: node client, chain API client, payments, HTTP service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tsn-coordinator"
+path = "src/bin/tsn-coordinator.rs"
+
+[dependencies]
+tsn-core.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+ed25519-dalek.workspace = true
+axum.workspace = true
+futures = "0.3"
+tower-http = { version = "0.6", features = ["cors"] }

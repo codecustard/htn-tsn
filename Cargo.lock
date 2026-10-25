@@ -4397,10 +4397,28 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tsn-coord",
+ "tsn-core",
+]
+
+[[package]]
+name = "tsn-coord"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "ed25519-dalek",
+ "futures",
+ "hex",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "tower-http",
  "tsn-core",
 ]
 

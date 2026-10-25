@@ -90,10 +90,26 @@ struct Node {
     keys: Mutex<HashMap<String, StoredKey>>,
     dkg_r1: Mutex<HashMap<String, dkg::round1::SecretPackage>>,
     dkg_r2: Mutex<HashMap<String, dkg::round2::SecretPackage>>,
-    nonces: Mutex<HashMap<String, (String, frost::round1::SigningNonces)>>,
+    nonces: Mutex<HashMap<String, PendingNonce>>,
+    /// Signing sessions served per authorization (request_id -> (count, expires_at)).
+    requests: Mutex<HashMap<String, (u32, u64)>>,
 }
 
 type Shared = Arc<Node>;
+
+/// Secret nonces waiting for round 2. Never written to disk; evicted after `NONCE_TTL_SECS`.
+struct PendingNonce {
+    key_id: String,
+    nonces: frost::round1::SigningNonces,
+    created: u64,
+}
+
+/// Unanswered commitments older than this are discarded.
+const NONCE_TTL_SECS: u64 = 300;
+/// Most outstanding commitments a node holds (bounds memory under request floods).
+const MAX_PENDING_NONCES: usize = 10_000;
+/// Most signing sessions one authorization may open (retries around bad nodes, per input).
+const MAX_SESSIONS_PER_REQUEST: u32 = 64;
 
 struct AppError(anyhow::Error);
 impl IntoResponse for AppError {
@@ -204,18 +220,27 @@ async fn dkg_part3(State(n): State<Shared>, Json(req): Json<DkgPart3Req>) -> Api
 
 async fn sign_commit(State(n): State<Shared>, Json(req): Json<CommitReq>) -> ApiResult<CommitResp> {
     let key = n.key(&req.key_id)?;
+    let now = auth::now_secs();
     let mut nonces = n.nonces.lock().unwrap();
+    nonces.retain(|_, p| p.created + NONCE_TTL_SECS > now);
+    require(nonces.len() < MAX_PENDING_NONCES, "too many pending signing sessions; retry later")?;
     require(!nonces.contains_key(&req.session_id), "session already used")?;
     let (secret_nonces, commitments) = frost::round1::commit(key.key_package.signing_share(), &mut OsRng);
-    nonces.insert(req.session_id, (req.key_id, secret_nonces));
+    nonces.insert(req.session_id, PendingNonce { key_id: req.key_id, nonces: secret_nonces, created: now });
     Ok(Json(CommitResp { commitments }))
 }
 
 fn check_request(n: &Node, req: &ShareReq, key: &StoredKey) -> Result<[u8; 32]> {
-    // 1. Owner authorization.
-    let tx_json = serde_json::to_string(&req.tx)?;
-    let digest = auth::request_digest(&req.key_id, &req.path, &req.session_id, &tx_json, req.input_index);
-    auth::verify_request(&req.path, &digest, &req.owner_sig)?;
+    // 1. Owner authorization: signed by the path's owner, unexpired, and not overused.
+    let now = auth::now_secs();
+    auth::verify(&req.key_id, &req.path, &req.tx, &req.auth, now)?;
+    {
+        let mut requests = n.requests.lock().unwrap();
+        requests.retain(|_, (_, exp)| *exp >= now);
+        let entry = requests.entry(req.auth.request_id.clone()).or_insert((0, req.auth.expires_at));
+        ensure!(entry.0 < MAX_SESSIONS_PER_REQUEST, "authorization used for too many signing sessions");
+        entry.0 += 1;
+    }
     // 2. The input must be owned by this path's derived key.
     let own_script = chain::p2pk_script(&derive::child_xonly(key.public_key_package.verifying_key(), &req.path)?);
     let input = req.tx.inputs.get(req.input_index).ok_or_else(|| anyhow!("input index out of range"))?;
@@ -236,9 +261,9 @@ fn check_request(n: &Node, req: &ShareReq, key: &StoredKey) -> Result<[u8; 32]> 
 
 async fn sign_share(State(n): State<Shared>, Json(req): Json<ShareReq>) -> ApiResult<ShareResp> {
     // 5. Nonces are single-use: remove before anything can fail.
-    let (key_id, nonces) =
-        n.nonces.lock().unwrap().remove(&req.session_id).ok_or_else(|| anyhow!("unknown or used session"))?;
-    require(key_id == req.key_id, "session belongs to another key")?;
+    let pending = n.nonces.lock().unwrap().remove(&req.session_id).ok_or_else(|| anyhow!("unknown or used session"))?;
+    require(pending.key_id == req.key_id, "session belongs to another key")?;
+    let nonces = pending.nonces;
     let key = n.key(&req.key_id)?;
     if let Err(e) = check_request(&n, &req, &key) {
         n.log(format!("REFUSED {} on {}: {e:#}", req.path, req.tx.network.prefix()));
@@ -308,6 +333,7 @@ async fn main() -> Result<()> {
                 dkg_r1: Default::default(),
                 dkg_r2: Default::default(),
                 nonces: Default::default(),
+                requests: Default::default(),
             });
             let app = Router::new()
                 .route("/info", get(info))

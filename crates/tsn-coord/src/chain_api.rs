@@ -117,14 +117,19 @@ pub fn submit_body(tx: &Tx) -> Result<Value> {
     }))
 }
 
-pub struct Api {
+#[derive(Clone)]
+pub struct ChainApi {
     base: String,
     http: reqwest::Client,
     /// True when using the network's default public API (so explorer links apply).
     pub is_default: bool,
 }
 
-impl Api {
+impl ChainApi {
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     pub fn new(network: Network, base: Option<String>) -> Result<Self> {
         let is_default = base.is_none();
         let base = base

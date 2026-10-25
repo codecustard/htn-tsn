@@ -1,10 +1,10 @@
 //! Wire types and the operator registry.
 
-use crate::chain::Tx;
 use crate::frost::{
     self,
     keys::{dkg::round1, PublicKeyPackage},
 };
+use crate::{auth::Authorization, chain::Tx};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -107,8 +107,8 @@ pub struct ShareReq {
     pub tx: Tx,
     pub input_index: usize,
     pub signing_package: frost::SigningPackage,
-    /// Owner's ed25519 signature over `auth::request_digest(..)`, hex.
-    pub owner_sig: String,
+    /// The owner's approval of this transaction (covers every input and retry).
+    pub auth: Authorization,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ShareResp {

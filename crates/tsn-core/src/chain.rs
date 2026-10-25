@@ -16,7 +16,7 @@ const OP_DATA_65: u8 = 0x41;
 const OP_CHECKSIG: u8 = 0xac;
 const OP_CHECKSIG_ECDSA: u8 = 0xab;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Network {
     KaspaMainnet,
@@ -50,9 +50,11 @@ pub struct TxInput {
     pub prev_txid: String,
     pub index: u32,
     /// Amount of the UTXO being spent, in sompi.
+    #[serde(with = "u64_string")]
     pub amount: u64,
     /// Script public key of the UTXO being spent, hex.
     pub script_pubkey: String,
+    #[serde(with = "u64_string")]
     pub sequence: u64,
     pub sig_op_count: u8,
     /// Filled in after signing.
@@ -63,6 +65,7 @@ pub struct TxInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TxOutput {
     pub address: String,
+    #[serde(with = "u64_string")]
     pub amount: u64,
 }
 
@@ -71,7 +74,26 @@ pub struct Tx {
     pub network: Network,
     pub inputs: Vec<TxInput>,
     pub outputs: Vec<TxOutput>,
+    #[serde(with = "u64_string")]
     pub lock_time: u64,
+}
+
+/// 64-bit values travel as decimal strings: JSON numbers above 2^53 lose precision in JavaScript,
+/// and a wrong amount would mean a wrong signature. Plain numbers are still accepted on input.
+pub mod u64_string {
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        match serde_json::Value::deserialize(d)? {
+            serde_json::Value::String(s) => s.parse().map_err(D::Error::custom),
+            serde_json::Value::Number(n) => n.as_u64().ok_or_else(|| D::Error::custom("not a u64")),
+            other => Err(D::Error::custom(format!("expected u64, got {other}"))),
+        }
+    }
 }
 
 /// `OP_DATA_32 <x-only key> OP_CHECKSIG` — standard Schnorr pay-to-pubkey.

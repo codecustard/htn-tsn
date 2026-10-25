@@ -6,19 +6,24 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
 use rand::{rngs::OsRng, RngCore};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf, time::Duration};
-mod api;
-
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use tsn_coord::{
+    chain_api::{self, ChainApi},
+    nodes::NodeClient,
+    payment,
+};
 use tsn_core::{
     address, auth,
-    build::{self, Amount},
+    build::Amount,
     chain::{self, Network, Tx, TxInput, TxOutput},
     derive,
-    frost::{self, keys::PublicKeyPackage},
-    identifier,
+    frost::keys::PublicKeyPackage,
     proto::*,
 };
+
+/// How long an owner authorization made by this CLI stays valid.
+const AUTH_TTL_SECS: u64 = 600;
 
 #[derive(Parser)]
 #[command(name = "tsn", about = "Hoosat/Kaspa threshold signing network — operator and client CLI")]
@@ -181,161 +186,12 @@ fn random_hex(n: usize) -> String {
     hex::encode(b)
 }
 
-struct Client {
-    http: reqwest::Client,
-    registry: Registry,
+fn parse_signers(s: Option<&str>) -> Result<Option<Vec<u16>>> {
+    s.map(|s| s.split(',').map(|x| x.trim().parse().map_err(|_| anyhow!("bad node id {x}"))).collect()).transpose()
 }
 
-impl Client {
-    fn new(registry: Registry) -> Self {
-        Self { http: reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap(), registry }
-    }
-
-    async fn post<Req: Serialize, Resp: DeserializeOwned>(&self, id: u16, route: &str, body: &Req) -> Result<Resp> {
-        let url = format!("{}{}", self.registry.node(id)?.url, route);
-        let r = self.http.post(&url).json(body).send().await.with_context(|| format!("node {id} unreachable"))?;
-        if r.status().is_success() {
-            Ok(r.json().await?)
-        } else {
-            let e: ErrorResp = r.json().await.unwrap_or(ErrorResp { error: "unknown error".into() });
-            bail!("node {id}: {}", e.error)
-        }
-    }
-
-    async fn live_nodes(&self) -> Vec<u16> {
-        let mut live = vec![];
-        for n in &self.registry.nodes {
-            if self.http.get(format!("{}/info", n.url)).send().await.map(|r| r.status().is_success()).unwrap_or(false) {
-                live.push(n.id);
-            }
-        }
-        live
-    }
-
-    async fn dkg(&self, key_id: &str) -> Result<PublicKeyPackage> {
-        let ids: Vec<u16> = self.registry.nodes.iter().map(|n| n.id).collect();
-        let mut r1 = BTreeMap::new();
-        for id in &ids {
-            let resp: DkgPart1Resp = self.post(*id, "/dkg/part1", &DkgPart1Req { key_id: key_id.into() }).await?;
-            r1.insert(*id, resp.package);
-        }
-        let others =
-            |me: u16| r1.iter().filter(|(k, _)| **k != me).map(|(k, v)| (*k, v.clone())).collect::<BTreeMap<_, _>>();
-        let mut inbox: BTreeMap<u16, BTreeMap<u16, String>> = BTreeMap::new();
-        for id in &ids {
-            let resp: DkgPart2Resp = self
-                .post(*id, "/dkg/part2", &DkgPart2Req { key_id: key_id.into(), round1_packages: others(*id) })
-                .await?;
-            for (to, ct) in resp.sealed {
-                inbox.entry(to).or_default().insert(*id, ct);
-            }
-        }
-        let mut result: Option<PublicKeyPackage> = None;
-        for id in &ids {
-            let req = DkgPart3Req {
-                key_id: key_id.into(),
-                round1_packages: others(*id),
-                sealed_for_me: inbox.remove(id).unwrap_or_default(),
-            };
-            let resp: DkgPart3Resp = self.post(*id, "/dkg/part3", &req).await?;
-            match &result {
-                Some(p) if p != &resp.public_key_package => bail!("node {id} disagrees on the group key"),
-                _ => result = Some(resp.public_key_package),
-            }
-        }
-        result.ok_or_else(|| anyhow!("no nodes"))
-    }
-
-    /// Threshold-signs every input of `tx`, routing around nodes that send invalid shares.
-    async fn sign_inputs(
-        &self,
-        key_id: &str,
-        path: &str,
-        owner: &SigningKey,
-        public: &PublicKeyPackage,
-        tx: &mut Tx,
-        signers: Option<&str>,
-    ) -> Result<()> {
-        let t = self.registry.threshold as usize;
-        for idx in 0..tx.inputs.len() {
-            let mut pool: Vec<u16> = match signers {
-                Some(s) => s.split(',').map(|x| x.trim().parse()).collect::<std::result::Result<_, _>>()?,
-                None => self.live_nodes().await,
-            };
-            let fixed = signers.is_some();
-            let sig = loop {
-                // With an explicit signer set the request goes to the nodes as-is, so a
-                // too-small set is refused by the nodes themselves rather than by this client.
-                if !fixed && pool.len() < t {
-                    bail!("only {} usable signers ({pool:?}); threshold is {t}", pool.len());
-                }
-                let chosen: Vec<u16> = if fixed { pool.clone() } else { pool[..t].to_vec() };
-                println!("input {idx}: signing with nodes {chosen:?}");
-                match self.sign_once(key_id, path, owner, public, tx, idx, &chosen).await? {
-                    Ok(sig) => break sig,
-                    Err(culprits) => {
-                        println!("input {idx}: invalid shares from {culprits:?} (identifiable abort) - excluding and retrying");
-                        if fixed {
-                            bail!("fixed signer set contains bad nodes {culprits:?}");
-                        }
-                        pool.retain(|id| !culprits.contains(id));
-                    }
-                }
-            };
-            tx.inputs[idx].signature_script = hex::encode(chain::signature_script(&sig));
-        }
-        Ok(())
-    }
-
-    /// One FROST session for one input. Returns the signature or the culprits of an invalid share.
-    #[allow(clippy::too_many_arguments)]
-    async fn sign_once(
-        &self,
-        key_id: &str,
-        path: &str,
-        owner: &SigningKey,
-        public: &PublicKeyPackage,
-        tx: &Tx,
-        idx: usize,
-        signers: &[u16],
-    ) -> Result<std::result::Result<[u8; 64], Vec<u16>>> {
-        let session_id = random_hex(16);
-        let mut commitments = BTreeMap::new();
-        for id in signers {
-            let r: CommitResp = self
-                .post(*id, "/sign/commit", &CommitReq { key_id: key_id.into(), session_id: session_id.clone() })
-                .await?;
-            commitments.insert(identifier(*id)?, r.commitments);
-        }
-        let sighash = chain::sighash(tx, idx)?;
-        let signing_package = frost::SigningPackage::new(commitments, &sighash);
-        let tx_json = serde_json::to_string(tx)?;
-        let owner_sig = auth::sign_request(owner, &auth::request_digest(key_id, path, &session_id, &tx_json, idx));
-        let mut shares = BTreeMap::new();
-        for id in signers {
-            let req = ShareReq {
-                key_id: key_id.into(),
-                session_id: session_id.clone(),
-                path: path.into(),
-                tx: tx.clone(),
-                input_index: idx,
-                signing_package: signing_package.clone(),
-                owner_sig: owner_sig.clone(),
-            };
-            let r: ShareResp = self.post(*id, "/sign/share", &req).await?;
-            shares.insert(identifier(*id)?, r.share);
-        }
-        let child_public = derive::public_key_package(public, path)?;
-        match frost::aggregate(&signing_package, &shares, &child_public) {
-            Ok(sig) => Ok(Ok(sig.serialize()?.try_into().map_err(|_| anyhow!("bad signature length"))?)),
-            Err(e) if !e.culprits().is_empty() => {
-                let ids: BTreeMap<frost::Identifier, u16> =
-                    self.registry.nodes.iter().map(|n| Ok((identifier(n.id)?, n.id))).collect::<Result<_>>()?;
-                Ok(Err(e.culprits().iter().map(|c| ids[c]).collect()))
-            }
-            Err(e) => bail!("aggregation failed: {e}"),
-        }
-    }
+fn print_line(line: String) {
+    println!("{line}");
 }
 
 #[tokio::main]
@@ -358,7 +214,7 @@ async fn main() -> Result<()> {
             println!("registry: {threshold}-of-{n} -> {}", out.display());
         }
         Cmd::Dkg { registry, key_id, out } => {
-            let client = Client::new(Registry::load(&registry)?);
+            let client = NodeClient::new(Registry::load(&registry)?);
             let pkp = client.dkg(&key_id).await?;
             std::fs::write(&out, serde_json::to_vec_pretty(&pkp)?)?;
             println!("DKG complete: master key {}", hex::encode(pkp.verifying_key().serialize()?));
@@ -375,13 +231,10 @@ async fn main() -> Result<()> {
         }
         Cmd::Address { public, owner, name, network, script } => {
             let network = Network::parse(&network)?;
-            let path = auth::owner_path(&load_owner(&owner)?.verifying_key(), &name);
-            let xonly = derive::child_xonly(load_public(&public)?.verifying_key(), &path)?;
-            if script {
-                println!("{}", hex::encode(chain::p2pk_script(&xonly)));
-            } else {
-                println!("{}", address::encode(network.prefix(), address::VERSION_PUBKEY, &xonly));
-            }
+            let master = load_public(&public)?;
+            let (_, addr, spk) =
+                payment::key_address(master.verifying_key(), network, &load_owner(&owner)?.verifying_key(), &name)?;
+            println!("{}", if script { hex::encode(spk) } else { addr });
         }
         Cmd::Sign {
             registry,
@@ -398,7 +251,7 @@ async fn main() -> Result<()> {
             out,
         } => {
             let network = Network::parse(&network)?;
-            let client = Client::new(Registry::load(&registry)?);
+            let client = NodeClient::new(Registry::load(&registry)?);
             let public = load_public(&public)?;
             let owner = load_owner(&owner)?;
             let path_owner_key = match &path_owner {
@@ -428,7 +281,9 @@ async fn main() -> Result<()> {
                 lock_time: 0,
             };
             println!("from   {from}\nto     {to}\namount {amount} sompi (change {change}, fee {fee})");
-            client.sign_inputs(&key_id, &path, &owner, &public, &mut tx, signers.as_deref()).await?;
+            let authz = auth::authorize(&owner, &key_id, &path, &tx, AUTH_TTL_SECS)?;
+            let signers = parse_signers(signers.as_deref())?;
+            client.sign_inputs(&key_id, &path, &authz, &public, &mut tx, signers.as_deref(), &print_line).await?;
             chain::verify_signed(&tx)?;
             println!(
                 "signature valid: {}",
@@ -445,10 +300,10 @@ async fn main() -> Result<()> {
         }
         Cmd::Balance { public, owner, name, network, api } => {
             let network = Network::parse(&network)?;
-            let path = auth::owner_path(&load_owner(&owner)?.verifying_key(), &name);
-            let xonly = derive::child_xonly(load_public(&public)?.verifying_key(), &path)?;
-            let addr = address::encode(network.prefix(), address::VERSION_PUBKEY, &xonly);
-            let api = api::Api::new(network, api)?;
+            let master = load_public(&public)?;
+            let (_, addr, _) =
+                payment::key_address(master.verifying_key(), network, &load_owner(&owner)?.verifying_key(), &name)?;
+            let api = ChainApi::new(network, api)?;
             let utxos = api.utxos(&addr).await?;
             let total: u64 = utxos.iter().map(|u| u.entry.amount).sum();
             println!("address {addr}");
@@ -479,67 +334,42 @@ async fn main() -> Result<()> {
             out,
         } => {
             let network = Network::parse(&network)?;
-            let client = Client::new(Registry::load(&registry)?);
+            let client = NodeClient::new(Registry::load(&registry)?);
             let public = load_public(&public)?;
             let owner = load_owner(&owner)?;
-            let path = auth::owner_path(&owner.verifying_key(), &name);
-            let xonly = derive::child_xonly(public.verifying_key(), &path)?;
-            let own_script = chain::p2pk_script(&xonly);
-            let from = address::encode(network.prefix(), address::VERSION_PUBKEY, &xonly);
-            let api = api::Api::new(network, api)?;
-
-            let mut utxos = api.utxos(&from).await?;
-            utxos.retain(|u| {
-                u.entry.script_public_key.version == 0
-                    && hex::decode(&u.entry.script_public_key.script).map(|s| s == own_script).unwrap_or(false)
-            });
-            if network.is_hoosat() {
-                // HTND relays a spend only once its inputs are 1000 DAA old.
-                if let Some(daa) = api.virtual_daa_score().await {
-                    let before = utxos.len();
-                    utxos.retain(|u| u.entry.block_daa_score + 1000 <= daa);
-                    if utxos.len() < before {
-                        println!(
-                            "skipping {} UTXO(s) younger than Hoosat's 1000-DAA minimum input age; retry shortly",
-                            before - utxos.len()
-                        );
-                    }
-                }
-            }
-            let inputs: Vec<TxInput> = utxos
-                .iter()
-                .map(|u| TxInput {
-                    prev_txid: u.outpoint.transaction_id.clone(),
-                    index: u.outpoint.index,
-                    amount: u.entry.amount,
-                    script_pubkey: u.entry.script_public_key.script.clone(),
-                    sequence: 0,
-                    sig_op_count: 1,
-                    signature_script: String::new(),
-                })
-                .collect();
-            let feerate = match feerate {
-                Some(f) => f,
-                None => api.feerate().await.unwrap_or_else(|| api::fallback_feerate(network)),
-            };
-            let template = Tx { network, inputs: vec![], outputs: vec![], lock_time: 0 };
+            let api = ChainApi::new(network, api)?;
             let amount = if all { Amount::All } else { Amount::Exact(amount.expect("clap enforces amount or --all")) };
-            let plan = build::build_payment(&template, inputs, &to, amount, &from, feerate)?;
-            if plan.fee > max_fee {
-                bail!("fee {} sompi exceeds --max-fee {max_fee} (fee rate {feerate} sompi/gram, mass {}); raise --max-fee or set --feerate", plan.fee, plan.mass);
+            let req = payment::Request {
+                network,
+                owner: owner.verifying_key(),
+                name,
+                to: to.clone(),
+                amount,
+                feerate,
+                max_fee,
+            };
+            let p = payment::prepare(&api, public.verifying_key(), &req).await?;
+            if p.skipped_young_utxos > 0 {
+                println!(
+                    "skipping {} UTXO(s) younger than Hoosat's minimum input age; retry shortly to include them",
+                    p.skipped_young_utxos
+                );
             }
-            let mut tx = plan.tx;
-            println!("from   {from}\nto     {to}");
+            let mut tx = p.tx;
+            println!("from   {}\nto     {to}", p.from);
             println!(
-                "amount {} sompi, change {}, fee {} ({} grams at {feerate} sompi/gram), {} input(s)",
+                "amount {} sompi, change {}, fee {} ({} grams at {} sompi/gram), {} input(s)",
                 tx.outputs[0].amount,
-                plan.change,
-                plan.fee,
-                plan.mass,
+                p.change,
+                p.fee,
+                p.mass,
+                p.feerate,
                 tx.inputs.len()
             );
 
-            client.sign_inputs(&key_id, &path, &owner, &public, &mut tx, signers.as_deref()).await?;
+            let authz = auth::authorize(&owner, &key_id, &p.path, &tx, AUTH_TTL_SECS)?;
+            let signers = parse_signers(signers.as_deref())?;
+            client.sign_inputs(&key_id, &p.path, &authz, &public, &mut tx, signers.as_deref(), &print_line).await?;
             chain::verify_signed(&tx)?;
             println!(
                 "signatures valid ({})",
@@ -547,7 +377,7 @@ async fn main() -> Result<()> {
             );
             if !network.is_hoosat() {
                 match api.server_mass(&tx).await {
-                    Ok(m) => println!("API mass check: {m} (local estimate {})", plan.mass),
+                    Ok(m) => println!("API mass check: {m} (local estimate {})", p.mass),
                     Err(e) => println!("API mass check unavailable: {e:#}"),
                 }
             }
@@ -560,7 +390,7 @@ async fn main() -> Result<()> {
             } else {
                 let txid = api.submit(&tx).await?;
                 println!("broadcast: {txid}");
-                if let Some(url) = api::explorer_tx_url(network, &txid).filter(|_| api.is_default) {
+                if let Some(url) = chain_api::explorer_tx_url(network, &txid).filter(|_| api.is_default) {
                     println!("{url}");
                 }
             }

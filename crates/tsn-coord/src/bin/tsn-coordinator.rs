@@ -38,6 +38,7 @@ use tsn_coord::{
     chain_api::{self, ChainApi},
     nodes::NodeClient,
     payment,
+    spent::RecentSpends,
 };
 use tsn_core::{
     auth::{self, Authorization},
@@ -85,6 +86,7 @@ struct App {
     api_key: Option<String>,
     rate_limit: u32,
     rate: Mutex<HashMap<IpAddr, (u64, u32)>>,
+    spent: RecentSpends,
 }
 
 type Shared = Arc<App>;
@@ -292,7 +294,7 @@ async fn prepare(State(app): State<Shared>, Json(r): Json<PrepareReq>) -> ApiRes
         feerate: r.feerate,
         max_fee,
     };
-    let prepared = payment::prepare(app.api(network)?, app.public.verifying_key(), &req).await?;
+    let prepared = payment::prepare(app.api(network)?, app.public.verifying_key(), &req, &app.spent).await?;
     let mut out = serde_json::to_value(&prepared)?;
     out["key_id"] = json!(app.key_id);
     Ok(Json(out))
@@ -337,6 +339,7 @@ async fn send_inner(app: &App, r: SendReq) -> Result<Value> {
     chain::verify_signed(&tx)?;
     let (txid, explorer) = if r.broadcast {
         let txid = api.submit(&tx).await?;
+        app.spent.record(&tx);
         println!("[{}] broadcast {txid}", &r.auth.request_id[..8]);
         let url = chain_api::explorer_tx_url(tx.network, &txid).filter(|_| api.is_default);
         (Some(txid), url)
@@ -373,6 +376,7 @@ async fn main() -> Result<()> {
         api_key: a.api_key.filter(|k| !k.is_empty()),
         rate_limit: a.rate_limit,
         rate: Mutex::new(HashMap::new()),
+        spent: RecentSpends::in_memory(),
     });
 
     let mut router = Router::new()

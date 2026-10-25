@@ -192,7 +192,14 @@ impl ChainApi {
             return Ok(id.to_string());
         }
         let err = v["error"].as_str().or(v["detail"].as_str()).map(str::to_string).unwrap_or_else(|| v.to_string());
-        bail!("node rejected transaction (HTTP {status}): {err}")
+        let lower = err.to_lowercase();
+        let hint = if lower.contains("orphan") || lower.contains("double spend") || lower.contains("already spent") {
+            "\nhint: an input was already spent, usually because the API had not yet indexed a payment made \
+             seconds ago. Nothing was sent; retry in a few seconds."
+        } else {
+            ""
+        };
+        bail!("node rejected transaction (HTTP {status}): {err}{hint}")
     }
 }
 

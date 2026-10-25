@@ -12,6 +12,7 @@ use tsn_coord::{
     chain_api::{self, ChainApi},
     nodes::NodeClient,
     payment,
+    spent::RecentSpends,
 };
 use tsn_core::{
     address, auth,
@@ -430,7 +431,16 @@ async fn main() -> Result<()> {
             let api = ChainApi::new(network, api)?;
             let amount = if all { Amount::All } else { Amount::Exact(amount.expect("clap enforces amount or --all")) };
             let req = payment::Request { network, path, to: to.clone(), amount, feerate, max_fee };
-            let p = payment::prepare(&api, public.verifying_key(), &req).await?;
+            // Shared by CLI runs against the same network folder: skips coins spent seconds ago.
+            let spent =
+                RecentSpends::file(registry.parent().unwrap_or(std::path::Path::new(".")).join(".recent-spends.json"));
+            let p = payment::prepare(&api, public.verifying_key(), &req, &spent).await?;
+            if p.skipped_spent_utxos > 0 {
+                println!(
+                    "skipping {} coin(s) spent by a recent payment (the API hasn't caught up)",
+                    p.skipped_spent_utxos
+                );
+            }
             if p.skipped_young_utxos > 0 {
                 println!(
                     "skipping {} UTXO(s) younger than Hoosat's minimum input age; retry shortly to include them",
@@ -471,6 +481,7 @@ async fn main() -> Result<()> {
                 println!("dry run: not broadcast");
             } else {
                 let txid = api.submit(&tx).await?;
+                spent.record(&tx);
                 println!("broadcast: {txid}");
                 if let Some(url) = chain_api::explorer_tx_url(network, &txid).filter(|_| api.is_default) {
                     println!("{url}");

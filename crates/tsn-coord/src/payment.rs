@@ -1,6 +1,9 @@
 //! Turning "send AMOUNT from OWNER/NAME to ADDRESS" into an unsigned transaction.
 
-use crate::chain_api::{self, ChainApi};
+use crate::{
+    chain_api::{self, ChainApi},
+    spent::RecentSpends,
+};
 use anyhow::{bail, Result};
 use ed25519_dalek::VerifyingKey as OwnerKey;
 use serde::Serialize;
@@ -40,6 +43,8 @@ pub struct Prepared {
     pub feerate: f64,
     /// UTXOs left out because they are too new to spend (Hoosat).
     pub skipped_young_utxos: usize,
+    /// UTXOs left out because a recent payment from this coordinator already spent them.
+    pub skipped_spent_utxos: usize,
 }
 
 /// Checks a key path: `owner/<ed25519 hex>/<name>` or `policy/<id>/<name>`.
@@ -71,7 +76,7 @@ pub fn key_address(
 }
 
 /// Fetches the key's UTXOs, selects coins, prices the fee and returns the unsigned transaction.
-pub async fn prepare(api: &ChainApi, master: &VerifyingKey, req: &Request) -> Result<Prepared> {
+pub async fn prepare(api: &ChainApi, master: &VerifyingKey, req: &Request, spent: &RecentSpends) -> Result<Prepared> {
     let path = req.path.clone();
     let (from, own_script) = path_address(master, req.network, &path)?;
     let mut utxos = api.utxos(&from).await?;
@@ -79,6 +84,15 @@ pub async fn prepare(api: &ChainApi, master: &VerifyingKey, req: &Request) -> Re
         u.entry.script_public_key.version == 0
             && hex::decode(&u.entry.script_public_key.script).map(|s| s == own_script).unwrap_or(false)
     });
+    let listed = utxos.len();
+    utxos.retain(|u| !spent.contains(&u.outpoint.transaction_id, u.outpoint.index));
+    let skipped_spent = listed - utxos.len();
+    if utxos.is_empty() && skipped_spent > 0 {
+        bail!(
+            "the {skipped_spent} coin(s) the API lists at {from} were just spent by a recent payment; \
+             retry in a few seconds, once the API shows its change"
+        );
+    }
     let mut skipped = 0;
     if req.network.is_hoosat() {
         if let Some(daa) = api.virtual_daa_score().await {
@@ -125,6 +139,7 @@ pub async fn prepare(api: &ChainApi, master: &VerifyingKey, req: &Request) -> Re
         change: plan.change,
         feerate,
         skipped_young_utxos: skipped,
+        skipped_spent_utxos: skipped_spent,
     })
 }
 

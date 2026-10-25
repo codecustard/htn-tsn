@@ -79,6 +79,8 @@ export interface Prepared {
   change: string;
   feerate: number;
   skipped_young_utxos: number;
+  /** Coins left out because a recent payment through this coordinator already spent them. */
+  skipped_spent_utxos?: number;
 }
 
 export interface SendResult {

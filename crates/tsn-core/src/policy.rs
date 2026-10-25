@@ -12,6 +12,10 @@
 //! - `only_to`: every output pays one of these addresses, or is change back to the key;
 //! - `max_per_tx`: the amount sent outside the key is at most this many sompi.
 //!
+//! Signers are `ed25519:<public key>` or `passkey:<domain>:<P-256 public key>`. A passkey
+//! approval is a WebAuthn assertion whose challenge is the request digest (see
+//! [`verify_passkey`]), so users approve with Face ID, Touch ID or a security key.
+//!
 //! Every condition can be checked by a node alone; nothing here needs state shared across
 //! nodes. The id covers a canonical JSON encoding (sorted keys, no whitespace), which the
 //! TypeScript SDK reproduces byte for byte (testdata/sdk-vectors.json).
@@ -60,11 +64,25 @@ pub struct Signers {
     pub of: Vec<String>,
 }
 
-/// One signer's approval: an ed25519 signature over the request digest.
+/// One signer's approval of the request digest.
+///
+/// ed25519 signers: `sig` is the 64-byte signature over the digest (hex).
+/// Passkey signers: a WebAuthn assertion — `sig` is the DER ECDSA signature, plus the exact
+/// `authenticator_data` and `client_data_json` bytes the authenticator signed (all hex).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Approval {
     pub signer: String,
     pub sig: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub authenticator_data: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_data_json: String,
+}
+
+impl Approval {
+    pub fn ed25519(signer: String, sig: String) -> Self {
+        Self { signer, sig, authenticator_data: String::new(), client_data_json: String::new() }
+    }
 }
 
 mod opt_u64_string {
@@ -89,14 +107,112 @@ pub fn ed25519_signer(key: &VerifyingKey) -> String {
     format!("ed25519:{}", hex::encode(key.as_bytes()))
 }
 
-fn parse_signer(id: &str) -> Result<VerifyingKey> {
-    let hex_key = id.strip_prefix("ed25519:").ok_or_else(|| anyhow!("unsupported signer type in {id}"))?;
-    ensure!(
-        hex_key.len() == 64 && hex_key.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
-        "signer {id} must be ed25519:<64 lowercase hex>"
-    );
-    let bytes: [u8; 32] = hex::decode(hex_key)?.try_into().map_err(|_| anyhow!("bad signer key"))?;
-    Ok(VerifyingKey::from_bytes(&bytes)?)
+enum Signer {
+    Ed25519(VerifyingKey),
+    Passkey { rp_id: String, key: p256::ecdsa::VerifyingKey },
+}
+
+fn is_lower_hex(s: &str) -> bool {
+    s.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+
+/// A WebAuthn relying-party id: a lowercase domain name (or `localhost`).
+fn valid_rp_id(rp: &str) -> bool {
+    !rp.is_empty()
+        && rp.len() <= 253
+        && !rp.starts_with('.')
+        && !rp.ends_with('.')
+        && !rp.contains("..")
+        && rp.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'.' || c == b'-')
+}
+
+fn parse_signer(id: &str) -> Result<Signer> {
+    if let Some(hex_key) = id.strip_prefix("ed25519:") {
+        ensure!(hex_key.len() == 64 && is_lower_hex(hex_key), "signer {id} must be ed25519:<64 lowercase hex>");
+        let bytes: [u8; 32] = hex::decode(hex_key)?.try_into().map_err(|_| anyhow!("bad signer key"))?;
+        return Ok(Signer::Ed25519(VerifyingKey::from_bytes(&bytes)?));
+    }
+    if let Some(rest) = id.strip_prefix("passkey:") {
+        let (rp_id, hex_key) =
+            rest.rsplit_once(':').ok_or_else(|| anyhow!("signer {id} must be passkey:<domain>:<key>"))?;
+        ensure!(valid_rp_id(rp_id), "signer {id}: bad passkey domain");
+        ensure!(
+            hex_key.len() == 66 && is_lower_hex(hex_key),
+            "signer {id}: passkey key must be a 33-byte compressed P-256 point (66 lowercase hex)"
+        );
+        let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(&hex::decode(hex_key)?)
+            .map_err(|_| anyhow!("signer {id}: not a P-256 point"))?;
+        return Ok(Signer::Passkey { rp_id: rp_id.to_string(), key });
+    }
+    bail!("unsupported signer type in {id}")
+}
+
+/// `passkey:<rp id>:<compressed P-256 key hex>` for a passkey registered on `rp_id`.
+pub fn passkey_signer(rp_id: &str, key: &p256::ecdsa::VerifyingKey) -> String {
+    format!("passkey:{rp_id}:{}", hex::encode(key.to_encoded_point(true).as_bytes()))
+}
+
+/// WebAuthn flags: user present and user verified (biometric or PIN).
+const FLAG_UP: u8 = 0x01;
+const FLAG_UV: u8 = 0x04;
+
+/// Verifies a WebAuthn assertion as an approval of `digest`:
+/// - `clientDataJSON` is a `webauthn.get` whose challenge is base64url(digest), from an origin on
+///   `rp_id` (https, or http on localhost for development);
+/// - `authenticatorData` is for `rp_id` (SHA-256 of it) with user-present and user-verified set;
+/// - the P-256 signature covers `authenticatorData || SHA-256(clientDataJSON)`.
+pub fn verify_passkey(
+    rp_id: &str,
+    key: &p256::ecdsa::VerifyingKey,
+    digest: &[u8; 32],
+    authenticator_data: &[u8],
+    client_data_json: &[u8],
+    der_sig: &[u8],
+) -> Result<()> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use p256::ecdsa::signature::Verifier as _;
+
+    let cd: Value = serde_json::from_slice(client_data_json).map_err(|_| anyhow!("clientDataJSON is not JSON"))?;
+    ensure!(cd["type"] == "webauthn.get", "not a WebAuthn assertion");
+    ensure!(cd["challenge"].as_str() == Some(&URL_SAFE_NO_PAD.encode(digest)), "passkey signed a different request");
+    let origin = cd["origin"].as_str().ok_or_else(|| anyhow!("clientDataJSON has no origin"))?;
+    let (scheme, rest) = origin.split_once("://").ok_or_else(|| anyhow!("bad origin {origin}"))?;
+    let host = rest.split([':', '/']).next().unwrap_or_default();
+    let on_rp = host == rp_id || host.ends_with(&format!(".{rp_id}"));
+    let secure = scheme == "https" || (scheme == "http" && host == "localhost");
+    ensure!(on_rp && secure, "passkey used from origin {origin}, not {rp_id}");
+
+    ensure!(authenticator_data.len() >= 37, "authenticatorData too short");
+    ensure!(authenticator_data[..32] == Sha256::digest(rp_id.as_bytes())[..], "passkey was for a different domain");
+    let flags = authenticator_data[32];
+    ensure!(flags & FLAG_UP != 0, "passkey: user not present");
+    ensure!(flags & FLAG_UV != 0, "passkey: user not verified (biometric or PIN required)");
+
+    let sig = p256::ecdsa::Signature::from_der(der_sig).map_err(|_| anyhow!("passkey signature is not DER ECDSA"))?;
+    let sig = sig.normalize_s().unwrap_or(sig);
+    let mut msg = authenticator_data.to_vec();
+    msg.extend_from_slice(&Sha256::digest(client_data_json));
+    key.verify(&msg, &sig).map_err(|_| anyhow!("passkey signature does not verify"))
+}
+
+fn verify_approval(a: &Approval, digest: &[u8; 32]) -> Result<()> {
+    match parse_signer(&a.signer)? {
+        Signer::Ed25519(key) => {
+            let sig: [u8; 64] =
+                hex::decode(&a.sig)?.try_into().map_err(|_| anyhow!("approval signature must be 64 bytes"))?;
+            key.verify(digest, &Signature::from_bytes(&sig))
+                .map_err(|_| anyhow!("approval from {} does not verify", a.signer))
+        }
+        Signer::Passkey { rp_id, key } => verify_passkey(
+            &rp_id,
+            &key,
+            digest,
+            &hex::decode(&a.authenticator_data)?,
+            &hex::decode(&a.client_data_json)?,
+            &hex::decode(&a.sig)?,
+        )
+        .map_err(|e| anyhow!("approval from {}: {e}", a.signer)),
+    }
 }
 
 /// Serializes a JSON value with object keys sorted and no whitespace.
@@ -183,11 +299,7 @@ impl Policy {
         // Signers whose approval verifies; invalid approvals are an error, not silently ignored.
         let mut approved = BTreeSet::new();
         for a in approvals {
-            let key = parse_signer(&a.signer)?;
-            let sig: [u8; 64] =
-                hex::decode(&a.sig)?.try_into().map_err(|_| anyhow!("approval signature must be 64 bytes"))?;
-            key.verify(digest, &Signature::from_bytes(&sig))
-                .map_err(|_| anyhow!("approval from {} does not verify", a.signer))?;
+            verify_approval(a, digest)?;
             approved.insert(a.signer.as_str());
         }
         let external = crate::chain::external_spend(tx, own_script)?;
@@ -253,7 +365,7 @@ mod tests {
     }
 
     fn approve(k: &SigningKey, digest: &[u8; 32]) -> Approval {
-        Approval { signer: ed25519_signer(&k.verifying_key()), sig: hex::encode(k.sign(digest).to_bytes()) }
+        Approval::ed25519(ed25519_signer(&k.verifying_key()), hex::encode(k.sign(digest).to_bytes()))
     }
 
     fn setup() -> (Policy, Tx, Vec<u8>, String, String) {
@@ -324,7 +436,7 @@ mod tests {
         assert!(policy.evaluate(&big, &own, &[approve(&server, &d)], &d, 0).is_err());
         // An outsider's approval doesn't count; a bad signature is an error.
         assert!(policy.evaluate(&to_stranger, &own, &[approve(&server, &d), approve(&mallory, &d)], &d, 0).is_err());
-        let forged = Approval { signer: ed25519_signer(&ops.verifying_key()), sig: approve(&mallory, &d).sig };
+        let forged = Approval::ed25519(ed25519_signer(&ops.verifying_key()), approve(&mallory, &d).sig);
         assert!(policy.evaluate(&to_stranger, &own, &[approve(&server, &d), forged], &d, 0).is_err());
         // Approvals over a different digest don't count.
         let other = [8u8; 32];
@@ -379,5 +491,120 @@ mod tests {
         assert!(dup.validate().is_err());
         assert!(serde_json::from_str::<Policy>(r#"{"version":1,"clauses":[],"extra":1}"#).is_err());
         assert!(parse_path(&policy.path("vault").unwrap()).is_ok());
+    }
+
+    /// Software authenticator: builds what a browser + passkey would return for `digest`.
+    pub(crate) fn passkey_assertion(
+        key: &p256::ecdsa::SigningKey,
+        rp_id: &str,
+        origin: &str,
+        flags: u8,
+        challenge: &[u8; 32],
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use p256::ecdsa::signature::Signer as _;
+        let mut ad = Sha256::digest(rp_id.as_bytes()).to_vec();
+        ad.push(flags);
+        ad.extend_from_slice(&[0, 0, 0, 0]);
+        let cd = format!(
+            r#"{{"type":"webauthn.get","challenge":"{}","origin":"{origin}","crossOrigin":false}}"#,
+            URL_SAFE_NO_PAD.encode(challenge)
+        )
+        .into_bytes();
+        let mut msg = ad.clone();
+        msg.extend_from_slice(&Sha256::digest(&cd));
+        let sig: p256::ecdsa::Signature = key.sign(&msg);
+        (ad, cd, sig.to_der().as_bytes().to_vec())
+    }
+
+    #[test]
+    fn passkey_approvals() {
+        let pk = p256::ecdsa::SigningKey::from_bytes(&[5u8; 32].into()).unwrap();
+        let signer = passkey_signer("wallet.example.com", pk.verifying_key());
+        let policy = Policy {
+            version: 1,
+            clauses: vec![Clause {
+                signers: Signers { k: 1, of: vec![signer.clone()] },
+                after: None,
+                only_to: None,
+                max_per_tx: None,
+            }],
+        };
+        policy.validate().unwrap();
+        let (_, tx, own, _, _) = setup();
+        let d = [3u8; 32];
+        let approval = |rp: &str, origin: &str, flags: u8, challenge: &[u8; 32]| {
+            let (ad, cd, sig) = passkey_assertion(&pk, rp, origin, flags, challenge);
+            Approval {
+                signer: signer.clone(),
+                sig: hex::encode(sig),
+                authenticator_data: hex::encode(ad),
+                client_data_json: hex::encode(cd),
+            }
+        };
+        let ok = approval("wallet.example.com", "https://wallet.example.com", FLAG_UP | FLAG_UV, &d);
+        assert_eq!(policy.evaluate(&tx, &own, std::slice::from_ref(&ok), &d, 0).unwrap(), 0);
+        let sub = approval("wallet.example.com", "https://app.wallet.example.com", FLAG_UP | FLAG_UV, &d);
+        assert!(policy.evaluate(&tx, &own, &[sub], &d, 0).is_ok());
+
+        let fails = [
+            (
+                "other request",
+                approval("wallet.example.com", "https://wallet.example.com", FLAG_UP | FLAG_UV, &[4u8; 32]),
+            ),
+            ("phishing origin", approval("wallet.example.com", "https://wallet-example.com", FLAG_UP | FLAG_UV, &d)),
+            ("plain http", approval("wallet.example.com", "http://wallet.example.com", FLAG_UP | FLAG_UV, &d)),
+            ("other domain", approval("evil.com", "https://wallet.example.com", FLAG_UP | FLAG_UV, &d)),
+            ("no user verification", approval("wallet.example.com", "https://wallet.example.com", FLAG_UP, &d)),
+        ];
+        for (why, a) in fails {
+            assert!(policy.evaluate(&tx, &own, &[a], &d, 0).is_err(), "{why} should fail");
+        }
+        let mut tampered = ok.clone();
+        tampered.authenticator_data.replace_range(64..66, "01"); // flags byte -> user present only
+        assert!(policy.evaluate(&tx, &own, &[tampered], &d, 0).is_err());
+        let other = p256::ecdsa::SigningKey::from_bytes(&[6u8; 32].into()).unwrap();
+        let (ad, cd, sig) =
+            passkey_assertion(&other, "wallet.example.com", "https://wallet.example.com", FLAG_UP | FLAG_UV, &d);
+        let wrong_key = Approval {
+            signer,
+            sig: hex::encode(sig),
+            authenticator_data: hex::encode(ad),
+            client_data_json: hex::encode(cd),
+        };
+        assert!(policy.evaluate(&tx, &own, &[wrong_key], &d, 0).is_err());
+
+        // localhost over http is allowed for development.
+        let dev_pk = p256::ecdsa::SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
+        let dev_signer = passkey_signer("localhost", dev_pk.verifying_key());
+        let dev = Policy {
+            version: 1,
+            clauses: vec![Clause {
+                signers: Signers { k: 1, of: vec![dev_signer.clone()] },
+                after: None,
+                only_to: None,
+                max_per_tx: None,
+            }],
+        };
+        let (ad, cd, sig) = passkey_assertion(&dev_pk, "localhost", "http://localhost:8080", FLAG_UP | FLAG_UV, &d);
+        let a = Approval {
+            signer: dev_signer,
+            sig: hex::encode(sig),
+            authenticator_data: hex::encode(ad),
+            client_data_json: hex::encode(cd),
+        };
+        assert!(dev.evaluate(&tx, &own, &[a], &d, 0).is_ok());
+    }
+
+    #[test]
+    fn rejects_bad_passkey_signers() {
+        for bad in [
+            "passkey:Wallet.com:02aa",
+            "passkey::02",
+            "passkey:a..b:0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            "passkey:wallet.com:zz",
+        ] {
+            assert!(parse_signer(bad).is_err(), "{bad}");
+        }
     }
 }

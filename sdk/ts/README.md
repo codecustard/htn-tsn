@@ -50,6 +50,28 @@ When approvers are on different machines: one party prepares (`client.prepare({ 
 creates `newPolicyRequest(...)`, and sends it to each approver, who runs `checkIntent` and returns
 `approve(theirKey, request)`; then `client.send(path, prepared, policyAuthorization(request, approvals))`.
 
+## Passkeys
+
+Passkeys (Face ID, Touch ID, Windows Hello, security keys) can be policy signers. In the browser:
+
+```ts
+import { createPasskey, approveWithPasskey } from "@htn-tsn/sdk";
+
+// Once: create it and store { credentialId, rpId, signer } with the user's account.
+const passkey = await createPasskey({ rpId: "wallet.example.com", rpName: "My Wallet", userName: "alice" });
+const policy: Policy = { version: 1, clauses: [{ signers: { k: 1, of: [passkey.signer] }, max_per_tx: "2000000000" }] };
+
+// Each payment: the approve callback gets the checked request; the prompt signs that exact transaction.
+await client.payWithPolicy({ policy, name: "phone", network, to, amount, approve: (req) => approveWithPasskey(req, passkey) });
+```
+
+`rpId` must be the page's domain (or a parent of it); the nodes reject assertions from any other
+origin. The public key is only available when the passkey is created, so keep the policy (it holds
+the signer id); without it the address can't be spent from. `softPasskey(rpId, origin)` makes the
+same assertions in software, for tests. `examples/passkey.html` is a working test page
+(`./localnet.sh passkey` at the repo root), and `examples/passkey-pay.mjs` pays with a software
+passkey from Node.
+
 ## What the SDK checks
 
 The coordinator is untrusted, so the SDK never takes its word for anything that matters:
@@ -74,6 +96,7 @@ The coordinator is untrusted, so the SDK never takes its word for anything that 
 | `requestDigest(...)` | The bytes an owner signs (matches Rust; see `testdata/sdk-vectors.json`) |
 | `policyId`, `policyPath`, `policyAddress`, `normalizePolicy` | Policy keys, offline |
 | `TsnClient.payWithPolicy`, `newPolicyRequest`, `approve`, `policyAuthorization` | Spending from policy keys |
+| `createPasskey`, `approveWithPasskey`, `passkeySigner`, `softPasskey` | Passkey signers (browser WebAuthn; software for tests) |
 
 Amounts are `bigint` in arguments and decimal strings in transactions, because JSON numbers lose
 precision above 2^53.

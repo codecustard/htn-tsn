@@ -44,7 +44,8 @@ export function normalizePolicy(p: Policy): Policy {
       if (!Number.isInteger(c.signers.k) || c.signers.k < 1 || c.signers.k > of.length) throw new Error(`clause ${i}: k must be between 1 and ${of.length}`);
       const seen = new Set<string>();
       for (const s of of) {
-        if (!/^ed25519:[0-9a-f]{64}$/.test(s)) throw new Error(`clause ${i}: signer ${s} must be ed25519:<64 lowercase hex>`);
+        const ok = /^ed25519:[0-9a-f]{64}$/.test(s) || /^passkey:[a-z0-9-]+(\.[a-z0-9-]+)*:0[23][0-9a-f]{64}$/.test(s);
+        if (!ok) throw new Error(`clause ${i}: signer ${s} must be ed25519:<64 hex> or passkey:<domain>:<66 hex>`);
         if (seen.has(s)) throw new Error(`clause ${i}: duplicate signer ${s}`);
         seen.add(s);
       }

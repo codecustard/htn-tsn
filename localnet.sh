@@ -6,6 +6,7 @@
 #   ./localnet.sh balance <network>        UTXOs and balance from the public API
 #   ./localnet.sh send <network> --to ADDR (--amount SOMPI | --all) [--dry-run]
 #   ./localnet.sh serve [args]             run tsn-coordinator (HTTP API for apps) on 127.0.0.1:7100
+#   ./localnet.sh passkey                  coordinator + passkey test page (Touch ID) on localhost:8080
 #   ./localnet.sh down                     stop the nodes
 #
 # Networks: kaspa-testnet, kaspa-mainnet, hoosat-mainnet (hoosat-testnet needs --api URL).
@@ -78,6 +79,23 @@ case "$CMD" in
     echo "master public key (pin this in SDK clients): $(python3 -c 'import json,sys;print(json.load(sys.stdin)["verifying_key"])' < "$DIR/master.pub.json" 2>/dev/null || echo "see $DIR/master.pub.json")"
     exec "$BIN/tsn-coordinator" --registry "$DIR/registry.json" --public "$DIR/master.pub.json" "$@"
     ;;
+  passkey)
+    build
+    start
+    (cd sdk/ts && { [ -d node_modules ] || npm ci --silent; } && npm run --silent build)
+    master=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["verifying_key"])' < "$DIR/master.pub.json")
+    recovery=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["ed25519_public"])' < "$DIR/owner.json")
+    "$BIN/tsn-coordinator" --registry "$DIR/registry.json" --public "$DIR/master.pub.json" \
+      --cors-origin http://localhost:8080 "$@" >> "$DIR/coordinator.log" 2>&1 &
+    coord=$!
+    trap 'kill $coord 2>/dev/null' EXIT
+    echo "coordinator on 127.0.0.1:7100 (log: $DIR/coordinator.log)"
+    echo
+    echo "open http://localhost:8080/examples/passkey.html?master=$master&recovery=$recovery"
+    echo "(use localhost, not 127.0.0.1: the passkey is bound to the page's domain)"
+    echo
+    python3 -m http.server 8080 --bind 127.0.0.1 --directory sdk/ts
+    ;;
   status)
     for i in 1 2 3 4 5; do if alive "$i"; then echo "node $i up"; else echo "node $i down"; fi; done
     ;;
@@ -96,7 +114,7 @@ case "$CMD" in
       --name "$NAME" --network "$net" "$@"
     ;;
   *)
-    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

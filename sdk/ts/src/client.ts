@@ -5,8 +5,8 @@ import { encodeAddress, VERSION_PUBKEY } from "./bech32.js";
 import { childXOnly, keyAddress, type KeyAddress } from "./derive.js";
 import { checkIntent } from "./intent.js";
 import { authorize, type OwnerKey } from "./owner.js";
-import { approve, newPolicyRequest, normalizePolicy, policyAddress, policyAuthorization } from "./policy.js";
-import { PREFIX, type Authorization, type Balance, type Info, type Network, type Policy, type Prepared, type SendResult } from "./types.js";
+import { approve, newPolicyRequest, normalizePolicy, policyAddress, policyAuthorization, type PolicyRequest } from "./policy.js";
+import { PREFIX, type Approval, type Authorization, type Balance, type Info, type Network, type Policy, type Prepared, type SendResult } from "./types.js";
 
 export interface ClientOptions {
   /** Coordinator base URL, e.g. http://127.0.0.1:7100 */
@@ -41,11 +41,13 @@ export interface PayRequest {
   broadcast?: boolean;
 }
 
-/** Payment from a policy key, approved by the given signers (all on this machine). */
+/** Payment from a policy key. Approvals must satisfy some clause of the policy. */
 export interface PolicyPayRequest extends Omit<PayRequest, "owner"> {
   policy: Policy;
-  /** Keys of the approving signers; must satisfy some clause of the policy. */
-  approvers: OwnerKey[];
+  /** ed25519 owner keys that approve on this machine. */
+  approvers?: OwnerKey[];
+  /** Other approvals, e.g. `req => approveWithPasskey(req, passkey)`; called after the checks. */
+  approve?: (request: PolicyRequest) => Approval | Approval[] | Promise<Approval | Approval[]>;
 }
 
 export class TsnClient {
@@ -146,17 +148,19 @@ export class TsnClient {
   async payWithPolicy(r: PolicyPayRequest): Promise<SendResult & { prepared: Prepared; fee: bigint }> {
     const policy = normalizePolicy(r.policy);
     const key = this.policyAddress(policy, r.name, r.network);
-    if (r.approvers.length === 0) throw new Error("policy payments need at least one approver");
-    return this.payFrom(key, r, (prepared) => {
+    if (!r.approvers?.length && !r.approve) throw new Error("policy payments need approvers or an approve callback");
+    return this.payFrom(key, r, async (prepared) => {
       const req = newPolicyRequest(this.keyId, key.path, policy, prepared.tx, r.ttlSecs ?? 600);
-      return policyAuthorization(req, r.approvers.map((a) => approve(a, req)));
+      const approvals = (r.approvers ?? []).map((a) => approve(a, req));
+      if (r.approve) approvals.push(...[await r.approve(req)].flat());
+      return policyAuthorization(req, approvals);
     });
   }
 
   private async payFrom(
     key: KeyAddress,
     r: Omit<PayRequest, "owner">,
-    authorizeFor: (p: Prepared) => Authorization,
+    authorizeFor: (p: Prepared) => Authorization | Promise<Authorization>,
   ): Promise<SendResult & { prepared: Prepared; fee: bigint }> {
     await this.info();
     const maxFee = r.maxFee ?? 10_000_000n;
@@ -171,7 +175,7 @@ export class TsnClient {
       amount: r.amount,
       maxFee,
     });
-    const result = await this.send(key.path, prepared, authorizeFor(prepared), r.broadcast ?? true);
+    const result = await this.send(key.path, prepared, await authorizeFor(prepared), r.broadcast ?? true);
     const sameOutputs = JSON.stringify(result.tx.outputs) === JSON.stringify(prepared.tx.outputs);
     if (!sameOutputs) throw new Error("coordinator returned a transaction with different outputs");
     return { ...result, prepared, fee };

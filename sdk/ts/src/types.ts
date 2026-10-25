@@ -52,9 +52,12 @@ export interface Policy {
   clauses: Clause[];
 }
 
+/** ed25519: `sig` only. Passkey: DER `sig` plus the WebAuthn data the authenticator signed (all hex). */
 export interface Approval {
   signer: string;
   sig: string;
+  authenticator_data?: string;
+  client_data_json?: string;
 }
 
 /**

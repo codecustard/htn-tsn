@@ -151,10 +151,7 @@ pub fn authorize_policy(
     let digest = request_digest(key_id, path, &request_id, expires_at, tx)?;
     let approvals = signers
         .iter()
-        .map(|k| Approval {
-            signer: policy::ed25519_signer(&k.verifying_key()),
-            sig: hex::encode(k.sign(&digest).to_bytes()),
-        })
+        .map(|k| Approval::ed25519(policy::ed25519_signer(&k.verifying_key()), hex::encode(k.sign(&digest).to_bytes())))
         .collect();
     Ok(Authorization { request_id, expires_at, owner_sig: String::new(), approvals, policy: Some(policy.clone()) })
 }

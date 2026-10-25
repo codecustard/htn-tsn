@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Offline stand-in for the Kaspa/Hoosat REST API, used by demo.sh to exercise `tsn send`.
 
-Serves fixed UTXOs for one address and accepts POST /transactions, saving the body to --save.
+Serves fixed UTXOs for one or more addresses (repeat --address/--script/--utxos) and accepts
+POST /transactions, saving the latest body to --save.
 It does no validation; demo.sh re-verifies the saved transaction with the chain engines.
 """
 import argparse
@@ -11,25 +12,29 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 p = argparse.ArgumentParser()
 p.add_argument("--port", type=int, required=True)
-p.add_argument("--address", required=True)
-p.add_argument("--script", required=True, help="scriptPublicKey hex of --address")
-p.add_argument("--utxos", required=True, help="comma-separated amounts in sompi")
+p.add_argument("--address", required=True, action="append")
+p.add_argument("--script", required=True, action="append", help="scriptPublicKey hex of --address")
+p.add_argument("--utxos", required=True, action="append", help="comma-separated amounts in sompi")
 p.add_argument("--save", required=True)
 args = p.parse_args()
 
-UTXOS = [
-    {
-        "address": args.address,
-        "outpoint": {"transactionId": hashlib.sha256(f"{args.address}/{i}".encode()).hexdigest(), "index": 0},
-        "utxoEntry": {
-            "amount": str(int(a)),
-            "scriptPublicKey": {"scriptPublicKey": args.script},
-            "blockDaaScore": "1000",
-            "isCoinbase": False,
-        },
-    }
-    for i, a in enumerate(args.utxos.split(","))
-]
+assert len(args.address) == len(args.script) == len(args.utxos), "give --script and --utxos for every --address"
+UTXOS = {
+    address: [
+        {
+            "address": address,
+            "outpoint": {"transactionId": hashlib.sha256(f"{address}/{i}".encode()).hexdigest(), "index": 0},
+            "utxoEntry": {
+                "amount": str(int(a)),
+                "scriptPublicKey": {"scriptPublicKey": script},
+                "blockDaaScore": "1000",
+                "isCoinbase": False,
+            },
+        }
+        for i, a in enumerate(amounts.split(","))
+    ]
+    for address, script, amounts in zip(args.address, args.script, args.utxos)
+}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -45,10 +50,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == f"/addresses/{args.address}/utxos":
-            self.reply(200, UTXOS)
-        elif self.path.startswith("/addresses/") and self.path.endswith("/utxos"):
-            self.reply(200, [])
+        if self.path.startswith("/addresses/") and self.path.endswith("/utxos"):
+            self.reply(200, UTXOS.get(self.path[len("/addresses/") : -len("/utxos")], []))
         elif self.path == "/info/fee-estimate":
             self.reply(200, {"priorityBucket": {"feerate": 1}, "normalBuckets": [{"feerate": 1}], "lowBuckets": []})
         elif self.path == "/info/blockdag":

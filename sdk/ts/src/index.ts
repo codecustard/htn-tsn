@@ -16,4 +16,15 @@ export {
   policyAuthorization,
   type PolicyRequest,
 } from "./policy.js";
+export {
+  passkeySigner,
+  spkiToCompressed,
+  createPasskey,
+  approveWithPasskey,
+  softPasskey,
+  base64url,
+  fromBase64url,
+  type Passkey,
+} from "./passkey.js";
 export { TsnClient, type ClientOptions, type PayRequest, type PolicyPayRequest } from "./client.js";
+export { bytesToHex, hexToBytes } from "./bytes.js";

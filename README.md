@@ -31,6 +31,7 @@ The demo starts 5 nodes (node 2 is deliberately byzantine), runs DKG, derives ad
 | `tsn send` against a mock API (needs python3) | Picks 2 UTXOs, computes the fee, signs each input, "broadcasts" |
 | Policy keys: protected hot wallet, escrow | Allowed spends sign; wrong destination, missing approver or early refund are refused by the nodes |
 | SDK → `tsn-coordinator` → nodes (needs npm) | Pays via the HTTP service; SDK checks the transaction before the owner signs |
+| Passkey policy (software passkey) | Passkey alone pays up to its limit; over the limit, or an assertion from another site, is refused by the nodes |
 
 ## What "valid" means here
 
@@ -98,6 +99,35 @@ alone `after` a deadline), vesting (beneficiary `after` a date), recovery (owner
 `after` a date). Not yet: daily limits and announce-then-wait delays, which need state shared
 across nodes. In the SDK: `client.payWithPolicy({ policy, name, approvers, ... })`, or
 `newPolicyRequest` + `approve` when approvers are on different machines.
+
+### Passkey signers (Face ID / Touch ID)
+
+A signer can be a passkey: `passkey:<domain>:<P-256 public key>`. The approval is a WebAuthn
+assertion whose challenge is the request digest, so the user's fingerprint or face approves one
+exact transaction. Nodes check the signature, that the assertion came from that domain (origin and
+rpId; `http://localhost` is allowed for development), and that the device verified the user
+(biometric or PIN), not just a tap.
+
+```json
+{"version": 1, "clauses": [
+  {"signers": {"k": 1, "of": ["passkey:wallet.example.com:02…"]}, "max_per_tx": "2000000000"},
+  {"signers": {"k": 2, "of": ["passkey:wallet.example.com:02…", "ed25519:<recovery>"]}}
+]}
+```
+
+A phone wallet: the passkey alone pays up to 20 coins; more needs the recovery key too. Try it
+with your own Touch ID against the local network:
+
+```bash
+./localnet.sh passkey     # coordinator + test page; open the printed http://localhost:8080/... URL
+```
+
+The page creates a passkey, makes a policy key (passkey, optional limit, plus your localnet owner
+key as a backup), shows its address and balance, and sends with a Touch ID prompt. Fund the address
+from the localnet key (`./localnet.sh send hoosat-mainnet --to <address> --amount ...`). If the
+passkey is lost, the owner key still moves the coins:
+`tsn send --registry localnet/registry.json --public localnet/master.pub.json --policy phone.policy.json --name phone --approver localnet/owner.json ...`.
+A passkey is bound to its domain: one made on `localhost` can't approve for `wallet.example.com`.
 
 ## Signing service for apps
 

@@ -127,8 +127,20 @@ if command -v python3 >/dev/null && command -v npm >/dev/null; then
   (cd sdk/ts && npm run --silent build)
   ADDR=$($BIN/tsn address --public "$DEMO/master.pub.json" --owner "$DEMO/alice.json" --name treasury --network kaspa-testnet)
   SCRIPT=$($BIN/tsn address --public "$DEMO/master.pub.json" --owner "$DEMO/alice.json" --name treasury --network kaspa-testnet --script)
-  python3 tools/mock_api.py --port 7099 --address "$ADDR" --script "$SCRIPT" \
-    --utxos 3000000000 --save "$DEMO/submitted-sdk.json" &
+  # Phone wallet: the user's passkey alone pays up to 20 KAS; more needs the passkey plus a recovery key.
+  export PASSKEY_SECRET=$(python3 -c 'import secrets;print(secrets.token_hex(32))')
+  PASSKEY=$(node sdk/ts/examples/passkey-pay.mjs signer)
+  $BIN/tsn owner-new --out "$DEMO/recovery.json" >/dev/null
+  cat > "$DEMO/phone.policy.json" <<JSON
+{"version": 1, "clauses": [
+  {"signers": {"k": 1, "of": ["$PASSKEY"]}, "max_per_tx": "2000000000"},
+  {"signers": {"k": 2, "of": ["$PASSKEY", "ed25519:$(pub "$DEMO/recovery.json")"]}}
+]}
+JSON
+  PADDR=$($BIN/tsn address --public "$DEMO/master.pub.json" --policy "$DEMO/phone.policy.json" --name phone --network kaspa-testnet)
+  PSCRIPT=$($BIN/tsn address --public "$DEMO/master.pub.json" --policy "$DEMO/phone.policy.json" --name phone --network kaspa-testnet --script)
+  python3 tools/mock_api.py --port 7099 --address "$ADDR" --script "$SCRIPT" --utxos 3000000000 \
+    --address "$PADDR" --script "$PSCRIPT" --utxos 5000000000 --save "$DEMO/submitted-sdk.json" &
   PIDS+=($!)
   $BIN/tsn-coordinator --registry "$DEMO/registry.json" --public "$DEMO/master.pub.json" --listen 127.0.0.1:7098 \
     --api kaspa-testnet=http://127.0.0.1:7099 > "$DEMO/coordinator.log" 2>&1 &
@@ -138,6 +150,14 @@ if command -v python3 >/dev/null && command -v npm >/dev/null; then
   SECRET=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["ed25519_secret"])' < "$DEMO/alice.json")
   TSN_URL=http://127.0.0.1:7098 TSN_MASTER=$MASTER OWNER_SECRET=$SECRET NETWORK=kaspa-testnet NAME=treasury \
     TO="$BOB_KAS" AMOUNT=1000000000 OUT="$DEMO/sent-sdk.json" node sdk/ts/examples/pay.mjs
+  echo "-- passkey policy: $PASSKEY"
+  PK=(env TSN_URL=http://127.0.0.1:7098 TSN_MASTER=$MASTER POLICY="$DEMO/phone.policy.json" NAME=phone NETWORK=kaspa-testnet TO="$CAROL_KAS")
+  echo "-- the passkey alone can't move 25 KAS (over its 20 KAS limit)"
+  expect_fail "${PK[@]}" AMOUNT=2500000000 node sdk/ts/examples/passkey-pay.mjs
+  echo "-- a phishing site's assertion is refused (origin is not localhost)"
+  expect_fail "${PK[@]}" AMOUNT=1000000000 ORIGIN=http://wallet-login.example node sdk/ts/examples/passkey-pay.mjs
+  echo "-- the passkey alone pays 10 KAS"
+  "${PK[@]}" AMOUNT=1000000000 OUT="$DEMO/sent-passkey.json" node sdk/ts/examples/passkey-pay.mjs
 fi
 
 step "15. Independent re-verification of the saved transactions"

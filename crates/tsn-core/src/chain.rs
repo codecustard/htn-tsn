@@ -38,8 +38,9 @@ impl Network {
         matches!(self, Network::HoosatMainnet | Network::HoosatTestnet)
     }
     pub fn parse(s: &str) -> Result<Self> {
-        serde_json::from_value(serde_json::Value::String(s.to_string()))
-            .map_err(|_| anyhow!("unknown network {s}; use kaspa-mainnet, kaspa-testnet, hoosat-mainnet, hoosat-testnet"))
+        serde_json::from_value(serde_json::Value::String(s.to_string())).map_err(|_| {
+            anyhow!("unknown network {s}; use kaspa-mainnet, kaspa-testnet, hoosat-mainnet, hoosat-testnet")
+        })
     }
 }
 
@@ -325,7 +326,10 @@ mod hoosat {
             let spk = hex::decode(&input.script_pubkey)?;
             ensure!(spk.len() == 34 && spk[0] == OP_DATA_32 && spk[33] == OP_CHECKSIG, "input {idx}: not P2PK Schnorr");
             let ss = hex::decode(&input.signature_script)?;
-            ensure!(ss.len() == 66 && ss[0] == OP_DATA_65 && ss[65] == SIGHASH_ALL, "input {idx}: bad signature script");
+            ensure!(
+                ss.len() == 66 && ss[0] == OP_DATA_65 && ss[65] == SIGHASH_ALL,
+                "input {idx}: bad signature script"
+            );
             let vk = VerifyingKey::from_bytes(&spk[1..33]).context("bad x-only key")?;
             let sig = Signature::try_from(&ss[1..65]).context("bad signature encoding")?;
             vk.verify_raw(&sighash(tx, idx)?, &sig).map_err(|_| anyhow!("input {idx}: BIP340 verification failed"))?;

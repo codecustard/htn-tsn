@@ -27,7 +27,13 @@ pub fn path_owner(path: &str) -> Result<VerifyingKey> {
 /// Digest the owner signs: binds key, path, session and the exact transaction.
 pub fn request_digest(key_id: &str, path: &str, session_id: &str, tx_json: &str, input_index: usize) -> [u8; 32] {
     let mut h = Sha256::new();
-    for part in [b"HTN-TSN/sign-request/v1".as_slice(), key_id.as_bytes(), path.as_bytes(), session_id.as_bytes(), tx_json.as_bytes()] {
+    for part in [
+        b"HTN-TSN/sign-request/v1".as_slice(),
+        key_id.as_bytes(),
+        path.as_bytes(),
+        session_id.as_bytes(),
+        tx_json.as_bytes(),
+    ] {
         h.update((part.len() as u64).to_le_bytes());
         h.update(part);
     }

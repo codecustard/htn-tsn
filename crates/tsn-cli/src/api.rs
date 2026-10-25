@@ -101,7 +101,9 @@ pub fn submit_body(tx: &Tx) -> Result<Value> {
     let mut outputs = Vec::new();
     for o in &tx.outputs {
         let spk = chain::script_for_address(tx.network, &o.address)?;
-        outputs.push(json!({ "amount": o.amount, "scriptPublicKey": { "version": 0, "scriptPublicKey": hex::encode(spk) } }));
+        outputs.push(
+            json!({ "amount": o.amount, "scriptPublicKey": { "version": 0, "scriptPublicKey": hex::encode(spk) } }),
+        );
     }
     Ok(json!({
         "transaction": {

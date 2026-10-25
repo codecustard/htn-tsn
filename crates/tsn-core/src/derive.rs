@@ -50,11 +50,8 @@ pub fn key_package(kp: &KeyPackage, path: &str) -> Result<KeyPackage> {
 pub fn public_key_package(pkp: &PublicKeyPackage, path: &str) -> Result<PublicKeyPackage> {
     let t = tweak(pkp.verifying_key(), path)?;
     let tp = ProjectivePoint::GENERATOR * t;
-    let shares: BTreeMap<_, _> = pkp
-        .verifying_shares()
-        .iter()
-        .map(|(id, vs)| (*id, VerifyingShare::new(vs.to_element() + tp)))
-        .collect();
+    let shares: BTreeMap<_, _> =
+        pkp.verifying_shares().iter().map(|(id, vs)| (*id, VerifyingShare::new(vs.to_element() + tp))).collect();
     Ok(PublicKeyPackage::new(shares, VerifyingKey::new(pkp.verifying_key().to_element() + tp), pkp.min_signers()))
 }
 

@@ -219,11 +219,13 @@ impl Client {
             let resp: DkgPart1Resp = self.post(*id, "/dkg/part1", &DkgPart1Req { key_id: key_id.into() }).await?;
             r1.insert(*id, resp.package);
         }
-        let others = |me: u16| r1.iter().filter(|(k, _)| **k != me).map(|(k, v)| (*k, v.clone())).collect::<BTreeMap<_, _>>();
+        let others =
+            |me: u16| r1.iter().filter(|(k, _)| **k != me).map(|(k, v)| (*k, v.clone())).collect::<BTreeMap<_, _>>();
         let mut inbox: BTreeMap<u16, BTreeMap<u16, String>> = BTreeMap::new();
         for id in &ids {
-            let resp: DkgPart2Resp =
-                self.post(*id, "/dkg/part2", &DkgPart2Req { key_id: key_id.into(), round1_packages: others(*id) }).await?;
+            let resp: DkgPart2Resp = self
+                .post(*id, "/dkg/part2", &DkgPart2Req { key_id: key_id.into(), round1_packages: others(*id) })
+                .await?;
             for (to, ct) in resp.sealed {
                 inbox.entry(to).or_default().insert(*id, ct);
             }
@@ -286,6 +288,7 @@ impl Client {
     }
 
     /// One FROST session for one input. Returns the signature or the culprits of an invalid share.
+    #[allow(clippy::too_many_arguments)]
     async fn sign_once(
         &self,
         key_id: &str,
@@ -299,7 +302,9 @@ impl Client {
         let session_id = random_hex(16);
         let mut commitments = BTreeMap::new();
         for id in signers {
-            let r: CommitResp = self.post(*id, "/sign/commit", &CommitReq { key_id: key_id.into(), session_id: session_id.clone() }).await?;
+            let r: CommitResp = self
+                .post(*id, "/sign/commit", &CommitReq { key_id: key_id.into(), session_id: session_id.clone() })
+                .await?;
             commitments.insert(identifier(*id)?, r.commitments);
         }
         let sighash = chain::sighash(tx, idx)?;
@@ -340,7 +345,8 @@ async fn main() -> Result<()> {
             let mut entries = vec![];
             for spec in nodes {
                 let (dir, url) = spec.split_once('=').ok_or_else(|| anyhow!("--node must be DIR=URL"))?;
-                let ident: NodeIdentity = serde_json::from_slice(&std::fs::read(PathBuf::from(dir).join("identity.pub.json"))?)?;
+                let ident: NodeIdentity =
+                    serde_json::from_slice(&std::fs::read(PathBuf::from(dir).join("identity.pub.json"))?)?;
                 entries.push(NodeEntry { id: ident.id, url: url.to_string(), x25519_pub: ident.x25519_pub });
             }
             entries.sort_by_key(|e| e.id);
@@ -360,7 +366,10 @@ async fn main() -> Result<()> {
         }
         Cmd::OwnerNew { out } => {
             let sk = SigningKey::generate(&mut OsRng);
-            let f = OwnerFile { ed25519_secret: hex::encode(sk.to_bytes()), ed25519_public: hex::encode(sk.verifying_key().as_bytes()) };
+            let f = OwnerFile {
+                ed25519_secret: hex::encode(sk.to_bytes()),
+                ed25519_public: hex::encode(sk.verifying_key().as_bytes()),
+            };
             std::fs::write(&out, serde_json::to_vec_pretty(&f)?)?;
             println!("owner {}", f.ed25519_public);
         }
@@ -374,7 +383,20 @@ async fn main() -> Result<()> {
                 println!("{}", address::encode(network.prefix(), address::VERSION_PUBKEY, &xonly));
             }
         }
-        Cmd::Sign { registry, public, key_id, owner, path_owner, name, network, to, amount, utxo_amount, signers, out } => {
+        Cmd::Sign {
+            registry,
+            public,
+            key_id,
+            owner,
+            path_owner,
+            name,
+            network,
+            to,
+            amount,
+            utxo_amount,
+            signers,
+            out,
+        } => {
             let network = Network::parse(&network)?;
             let client = Client::new(Registry::load(&registry)?);
             let public = load_public(&public)?;
@@ -399,7 +421,10 @@ async fn main() -> Result<()> {
                     sig_op_count: 1,
                     signature_script: String::new(),
                 }],
-                outputs: vec![TxOutput { address: to.clone(), amount }, TxOutput { address: from.clone(), amount: change }],
+                outputs: vec![
+                    TxOutput { address: to.clone(), amount },
+                    TxOutput { address: from.clone(), amount: change },
+                ],
                 lock_time: 0,
             };
             println!("from   {from}\nto     {to}\namount {amount} sompi (change {change}, fee {fee})");
@@ -407,7 +432,11 @@ async fn main() -> Result<()> {
             chain::verify_signed(&tx)?;
             println!(
                 "signature valid: {}",
-                if network.is_hoosat() { "BIP340 over Hoosat BLAKE3 sighash" } else { "accepted by the Kaspa consensus script engine" }
+                if network.is_hoosat() {
+                    "BIP340 over Hoosat BLAKE3 sighash"
+                } else {
+                    "accepted by the Kaspa consensus script engine"
+                }
             );
             if let Some(out) = out {
                 std::fs::write(&out, serde_json::to_vec_pretty(&tx)?)?;
@@ -425,11 +454,30 @@ async fn main() -> Result<()> {
             println!("address {addr}");
             for u in &utxos {
                 let kind = if u.entry.is_coinbase { ", coinbase" } else { "" };
-                println!("  {}:{}  {} sompi  (DAA {}{kind})", u.outpoint.transaction_id, u.outpoint.index, u.entry.amount, u.entry.block_daa_score);
+                println!(
+                    "  {}:{}  {} sompi  (DAA {}{kind})",
+                    u.outpoint.transaction_id, u.outpoint.index, u.entry.amount, u.entry.block_daa_score
+                );
             }
             println!("balance {total} sompi ({} UTXOs) = {}", utxos.len(), coins(total));
         }
-        Cmd::Send { registry, public, key_id, owner, name, network, to, amount, all, api, feerate, max_fee, signers, dry_run, out } => {
+        Cmd::Send {
+            registry,
+            public,
+            key_id,
+            owner,
+            name,
+            network,
+            to,
+            amount,
+            all,
+            api,
+            feerate,
+            max_fee,
+            signers,
+            dry_run,
+            out,
+        } => {
             let network = Network::parse(&network)?;
             let client = Client::new(Registry::load(&registry)?);
             let public = load_public(&public)?;
@@ -451,7 +499,10 @@ async fn main() -> Result<()> {
                     let before = utxos.len();
                     utxos.retain(|u| u.entry.block_daa_score + 1000 <= daa);
                     if utxos.len() < before {
-                        println!("skipping {} UTXO(s) younger than Hoosat's 1000-DAA minimum input age; retry shortly", before - utxos.len());
+                        println!(
+                            "skipping {} UTXO(s) younger than Hoosat's 1000-DAA minimum input age; retry shortly",
+                            before - utxos.len()
+                        );
                     }
                 }
             }
@@ -490,7 +541,10 @@ async fn main() -> Result<()> {
 
             client.sign_inputs(&key_id, &path, &owner, &public, &mut tx, signers.as_deref()).await?;
             chain::verify_signed(&tx)?;
-            println!("signatures valid ({})", if network.is_hoosat() { "BIP340 over Hoosat sighash" } else { "Kaspa consensus script engine" });
+            println!(
+                "signatures valid ({})",
+                if network.is_hoosat() { "BIP340 over Hoosat sighash" } else { "Kaspa consensus script engine" }
+            );
             if !network.is_hoosat() {
                 match api.server_mass(&tx).await {
                     Ok(m) => println!("API mass check: {m} (local estimate {})", plan.mass),

@@ -50,7 +50,7 @@ pub fn build_payment(
     // Validate addresses up front for clear errors.
     chain::script_for_address(template.network, to)?;
     chain::script_for_address(template.network, change_addr)?;
-    utxos.sort_by(|a, b| b.amount.cmp(&a.amount));
+    utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
     let total: u64 = utxos.iter().map(|u| u.amount).sum();
 
     match amount {
@@ -104,7 +104,10 @@ pub fn build_payment(
                     let tx = tx_with(
                         template,
                         inputs,
-                        vec![TxOutput { address: to.into(), amount }, TxOutput { address: change_addr.into(), amount: change }],
+                        vec![
+                            TxOutput { address: to.into(), amount },
+                            TxOutput { address: change_addr.into(), amount: change },
+                        ],
                     );
                     let mass = chain::estimate_mass(&tx)?;
                     let need = fee_for(mass, feerate);

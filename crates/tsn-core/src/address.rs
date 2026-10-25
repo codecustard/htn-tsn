@@ -60,12 +60,7 @@ fn conv5to8(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn checksum(prefix: &str, payload5: &[u8]) -> u64 {
-    let it = prefix
-        .bytes()
-        .map(|b| b & 0x1f)
-        .chain(std::iter::once(0))
-        .chain(payload5.iter().copied())
-        .chain([0u8; 8]);
+    let it = prefix.bytes().map(|b| b & 0x1f).chain(std::iter::once(0)).chain(payload5.iter().copied()).chain([0u8; 8]);
     polymod(it)
 }
 
@@ -92,7 +87,9 @@ pub fn decode(addr: &str) -> Result<(String, u8, Vec<u8>)> {
     }
     let values: Vec<u8> = body
         .bytes()
-        .map(|c| CHARSET.iter().position(|&x| x == c).map(|p| p as u8).ok_or_else(|| anyhow!("invalid char {}", c as char)))
+        .map(|c| {
+            CHARSET.iter().position(|&x| x == c).map(|p| p as u8).ok_or_else(|| anyhow!("invalid char {}", c as char))
+        })
         .collect::<Result<_>>()?;
     let (payload5, cs5) = values.split_at(values.len() - 8);
     let cs = cs5.iter().fold(0u64, |acc, &v| (acc << 5) | v as u64);

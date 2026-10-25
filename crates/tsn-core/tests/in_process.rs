@@ -78,7 +78,10 @@ fn demo_tx(network: Network, xonly: &[u8; 32]) -> Tx {
             sig_op_count: 1,
             signature_script: String::new(),
         }],
-        outputs: vec![TxOutput { address: to, amount: 1_000_000_000 }, TxOutput { address: change, amount: 3_999_990_000 }],
+        outputs: vec![
+            TxOutput { address: to, amount: 1_000_000_000 },
+            TxOutput { address: change, amount: 3_999_990_000 },
+        ],
         lock_time: 0,
     }
 }

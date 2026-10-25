@@ -137,11 +137,18 @@ impl Node {
 }
 
 fn require(cond: bool, msg: impl std::fmt::Display) -> Result<()> {
-    if cond { Ok(()) } else { Err(anyhow!("{msg}")) }
+    if cond {
+        Ok(())
+    } else {
+        Err(anyhow!("{msg}"))
+    }
 }
 
 fn valid_key_id(k: &str) -> Result<()> {
-    ensure!(!k.is_empty() && k.len() <= 64 && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'), "bad key id");
+    ensure!(
+        !k.is_empty() && k.len() <= 64 && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        "bad key id"
+    );
     Ok(())
 }
 
@@ -160,7 +167,8 @@ async fn dkg_part1(State(n): State<Shared>, Json(req): Json<DkgPart1Req>) -> Api
 }
 
 async fn dkg_part2(State(n): State<Shared>, Json(req): Json<DkgPart2Req>) -> ApiResult<DkgPart2Resp> {
-    let secret = n.dkg_r1.lock().unwrap().remove(&req.key_id).ok_or_else(|| anyhow!("no round 1 for {}", req.key_id))?;
+    let secret =
+        n.dkg_r1.lock().unwrap().remove(&req.key_id).ok_or_else(|| anyhow!("no round 1 for {}", req.key_id))?;
     let r1 = n.to_frost_map(&req.round1_packages)?;
     let (r2_secret, outgoing) = dkg::part2(secret, &r1)?;
     let ids = n.id_map()?;
@@ -176,7 +184,8 @@ async fn dkg_part2(State(n): State<Shared>, Json(req): Json<DkgPart2Req>) -> Api
 }
 
 async fn dkg_part3(State(n): State<Shared>, Json(req): Json<DkgPart3Req>) -> ApiResult<DkgPart3Resp> {
-    let r2_secret = n.dkg_r2.lock().unwrap().remove(&req.key_id).ok_or_else(|| anyhow!("no round 2 for {}", req.key_id))?;
+    let r2_secret =
+        n.dkg_r2.lock().unwrap().remove(&req.key_id).ok_or_else(|| anyhow!("no round 2 for {}", req.key_id))?;
     let r1 = n.to_frost_map(&req.round1_packages)?;
     let mut r2 = BTreeMap::new();
     for (from, hex_ct) in &req.sealed_for_me {
@@ -218,13 +227,17 @@ fn check_request(n: &Node, req: &ShareReq, key: &StoredKey) -> Result<[u8; 32]> 
     }
     // 4. Sign only what we computed ourselves.
     let sighash = chain::sighash(&req.tx, req.input_index)?;
-    ensure!(req.signing_package.message().as_slice() == sighash, "coordinator message does not match transaction sighash");
+    ensure!(
+        req.signing_package.message().as_slice() == sighash,
+        "coordinator message does not match transaction sighash"
+    );
     Ok(sighash)
 }
 
 async fn sign_share(State(n): State<Shared>, Json(req): Json<ShareReq>) -> ApiResult<ShareResp> {
     // 5. Nonces are single-use: remove before anything can fail.
-    let (key_id, nonces) = n.nonces.lock().unwrap().remove(&req.session_id).ok_or_else(|| anyhow!("unknown or used session"))?;
+    let (key_id, nonces) =
+        n.nonces.lock().unwrap().remove(&req.session_id).ok_or_else(|| anyhow!("unknown or used session"))?;
     require(key_id == req.key_id, "session belongs to another key")?;
     let key = n.key(&req.key_id)?;
     if let Err(e) = check_request(&n, &req, &key) {
@@ -258,8 +271,14 @@ async fn main() -> Result<()> {
             ensure!(!dir.join("identity.json").exists(), "identity already exists in {}", dir.display());
             let secret = StaticSecret::random_from_rng(OsRng);
             let public = hex::encode(PublicKey::from(&secret).as_bytes());
-            std::fs::write(dir.join("identity.json"), serde_json::to_vec_pretty(&IdentityFile { id, x25519_secret: hex::encode(secret.to_bytes()) })?)?;
-            std::fs::write(dir.join("identity.pub.json"), serde_json::to_vec_pretty(&NodeIdentity { id, x25519_pub: public.clone() })?)?;
+            std::fs::write(
+                dir.join("identity.json"),
+                serde_json::to_vec_pretty(&IdentityFile { id, x25519_secret: hex::encode(secret.to_bytes()) })?,
+            )?;
+            std::fs::write(
+                dir.join("identity.pub.json"),
+                serde_json::to_vec_pretty(&NodeIdentity { id, x25519_pub: public.clone() })?,
+            )?;
             println!("node {id} identity: {public}");
         }
         Cmd::Run { dir, registry, port, max_external_spend, byzantine } => {
@@ -267,7 +286,10 @@ async fn main() -> Result<()> {
             let bytes: [u8; 32] = hex::decode(&ident.x25519_secret)?.try_into().map_err(|_| anyhow!("bad secret"))?;
             let registry = Registry::load(&registry)?;
             let secret = StaticSecret::from(bytes);
-            ensure!(registry.x25519(ident.id)? == *PublicKey::from(&secret).as_bytes(), "registry entry does not match this node's identity");
+            ensure!(
+                registry.x25519(ident.id)? == *PublicKey::from(&secret).as_bytes(),
+                "registry entry does not match this node's identity"
+            );
             let mut keys = HashMap::new();
             if let Ok(rd) = std::fs::read_dir(dir.join("keys")) {
                 for e in rd.flatten() {

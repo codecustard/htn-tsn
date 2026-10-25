@@ -3,7 +3,7 @@
 //! - [`address`]: Kaspa/Hoosat bech32 address encoding.
 //! - [`chain`]: transaction model, per-chain sighash, mass, and signature verification.
 //! - [`build`]: coin selection, change and fees for real payments.
-//! - [`derive`]: ICP-style path-based key derivation on top of a FROST master key.
+//! - [`derive`]: path-based key derivation on top of a FROST master key.
 //! - [`seal`]: node-to-node encryption for DKG round-2 packages (coordinator cannot read them).
 //! - [`auth`]: owner request signing — binds a derived key to the identity allowed to use it.
 //! - [`proto`]: wire types shared by nodes and the coordinator.

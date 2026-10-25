@@ -1,4 +1,4 @@
-//! Owner-bound keys — the prototype's stand-in for ICP's "caller canister owns its derived keys".
+//! Owner-bound keys: each derived key belongs to the identity named in its path.
 //!
 //! A derivation path of the form `owner/<ed25519 pubkey hex>/<name>` belongs to that owner.
 //! Nodes contribute a signature share only when the request is signed by the owner key embedded

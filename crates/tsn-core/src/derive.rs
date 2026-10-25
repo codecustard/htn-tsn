@@ -1,4 +1,4 @@
-//! ICP-style key derivation: one master key from DKG, unlimited child keys addressed by a path.
+//! Path-based key derivation: one master key from DKG, unlimited child keys addressed by a path.
 //!
 //! child_secret = master_secret + t,  child_pub = master_pub + t·G,
 //! t = H("HTN-TSN/derive/v1", master_pub || path).
@@ -7,6 +7,7 @@
 //! signing subset, the shares still interpolate to child_secret — no new DKG per key, and no
 //! party ever holds the child key. This is non-hardened derivation: anyone with the master public
 //! key can compute every child public key (needed so clients can derive addresses offline).
+//! It is the same additive-tweak idea as BIP32 non-hardened derivation, with a single master key.
 
 use crate::frost::{
     keys::{KeyPackage, PublicKeyPackage, SigningShare, VerifyingShare},

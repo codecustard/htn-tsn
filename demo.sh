@@ -91,7 +91,26 @@ if command -v python3 >/dev/null; then
   done
 fi
 
-step "13. Independent re-verification of the saved transactions"
+if command -v python3 >/dev/null && command -v npm >/dev/null; then
+  step "13. App path: TypeScript SDK -> tsn-coordinator -> nodes (mock API)"
+  if [ ! -d sdk/ts/node_modules ]; then (cd sdk/ts && npm ci --silent); fi
+  (cd sdk/ts && npm run --silent build)
+  ADDR=$($BIN/tsn address --public "$DEMO/master.pub.json" --owner "$DEMO/alice.json" --name treasury --network kaspa-testnet)
+  SCRIPT=$($BIN/tsn address --public "$DEMO/master.pub.json" --owner "$DEMO/alice.json" --name treasury --network kaspa-testnet --script)
+  python3 tools/mock_api.py --port 7099 --address "$ADDR" --script "$SCRIPT" \
+    --utxos 3000000000 --save "$DEMO/submitted-sdk.json" &
+  PIDS+=($!)
+  $BIN/tsn-coordinator --registry "$DEMO/registry.json" --public "$DEMO/master.pub.json" --listen 127.0.0.1:7098 \
+    --api kaspa-testnet=http://127.0.0.1:7099 > "$DEMO/coordinator.log" 2>&1 &
+  PIDS+=($!)
+  until curl -sf http://127.0.0.1:7098/healthz >/dev/null && curl -sf http://127.0.0.1:7099/info/blockdag >/dev/null; do sleep 0.2; done
+  MASTER=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["verifying_key"])' < "$DEMO/master.pub.json")
+  SECRET=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["ed25519_secret"])' < "$DEMO/alice.json")
+  TSN_URL=http://127.0.0.1:7098 TSN_MASTER=$MASTER OWNER_SECRET=$SECRET NETWORK=kaspa-testnet NAME=treasury \
+    TO="$BOB_KAS" AMOUNT=1000000000 OUT="$DEMO/sent-sdk.json" node sdk/ts/examples/pay.mjs
+fi
+
+step "14. Independent re-verification of the saved transactions"
 $BIN/tsn verify --tx "$DEMO/signed-kaspa.json"
 $BIN/tsn verify --tx "$DEMO/signed-hoosat.json"
 for f in "$DEMO"/sent-*.json; do [ -f "$f" ] && $BIN/tsn verify --tx "$f"; done

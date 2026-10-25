@@ -1,0 +1,108 @@
+{
+  "addresses": [
+    {
+      "address": "kaspa:qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqkx9awp4e",
+      "data": "0000000000000000000000000000000000000000000000000000000000000000",
+      "prefix": "kaspa",
+      "version": 0
+    },
+    {
+      "address": "kaspatest:qqqqzqsrqszsvpcgpy9qkrqdpc83qygjzv2p29shrqv35xcur50p7an5vlrr8",
+      "data": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "prefix": "kaspatest",
+      "version": 0
+    },
+    {
+      "address": "hoosat:qrllllllllllllllllllllllllllllllllllllllllllllllllll7tlv7k3ll",
+      "data": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "prefix": "hoosat",
+      "version": 0
+    },
+    {
+      "address": "hoosattest:qyqqwrs4rs3j5vfc8ary64zmvf5hqam7skxf8x4p4zhmd0wye0fdncqeexyg2q8",
+      "data": "00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0",
+      "prefix": "hoosattest",
+      "version": 1
+    },
+    {
+      "address": "kaspa:ppd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95uf59k3fw",
+      "data": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "prefix": "kaspa",
+      "version": 8
+    }
+  ],
+  "authorization": {
+    "digest": "a0a0951f4abf3902ed4e55dce24ca85e63bbc7e6606508e638e6a388d6791ad8",
+    "expires_at": 1800000000,
+    "key_id": "master",
+    "owner_public_key": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+    "owner_secret": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+    "owner_sig": "3db037e0241f269a9cc77e08135f6c29aee9bbd9c3c65839f3b23d019bd598bacee0e9747407419c974c9a43db5595796aeb96634fbcf6508e8546a970301e02",
+    "path": "owner/197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61/main",
+    "request_id": "00112233445566778899aabbccddeeff",
+    "tx": {
+      "inputs": [
+        {
+          "amount": "9007199254740993",
+          "index": 3,
+          "prev_txid": "abababababababababababababababababababababababababababababababab",
+          "script_pubkey": "20cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdac",
+          "sequence": "18446744073709551615",
+          "sig_op_count": 1
+        },
+        {
+          "amount": "1",
+          "index": 0,
+          "prev_txid": "0101010101010101010101010101010101010101010101010101010101010101",
+          "script_pubkey": "20cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdac",
+          "sequence": "0",
+          "sig_op_count": 1
+        }
+      ],
+      "lock_time": "0",
+      "network": "hoosat-mainnet",
+      "outputs": [
+        {
+          "address": "hoosat:qr35ennsep3hxfe7lnz5ee7j5jgmkjswsn35ennsep3hxfe7ln35cta93d2lg",
+          "amount": "100000000"
+        },
+        {
+          "address": "hoosat:qyp0r5mcq4rd5grj3652ra09u5dcgwqq9ntuswp247nama5quyj40eq0f28wqsx",
+          "amount": "9007199154740000"
+        }
+      ]
+    }
+  },
+  "derivations": [
+    {
+      "hoosat_mainnet_address": "hoosat:qqn2tddg7aqdufkp9c3mhw9rpu0gyurzfth0qrzexpwvj2e3g4tpztxwyrm4s",
+      "kaspa_testnet_address": "kaspatest:qqn2tddg7aqdufkp9c3mhw9rpu0gyurzfth0qrzexpwvj2e3g4tpzv3zr972g",
+      "master_public_key": "025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+      "name": "main",
+      "owner_public_key": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+      "path": "owner/197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61/main",
+      "tweak": "f527bb9f924d500c5373acee2d0fceb410def3a843577aee36e11ccc89ca679b",
+      "xonly": "26a5b5a8f740de26c12e23bbb8a30f1e8270624aeef00c59305cc92b31455611"
+    },
+    {
+      "hoosat_mainnet_address": "hoosat:qpptgyzdnyejxcjpx5ak2lxa9u99rzgxyq0n9ahedhe3w4kpvrq96gdnxg604",
+      "kaspa_testnet_address": "kaspatest:qpptgyzdnyejxcjpx5ak2lxa9u99rzgxyq0n9ahedhe3w4kpvrq9606lpwlsd",
+      "master_public_key": "0208f4f37e2d8f74e18c1b8fde2374d5f28402fb8ab7fd1cc5b786aa40851a70cb",
+      "name": "treasury",
+      "owner_public_key": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+      "path": "owner/197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61/treasury",
+      "tweak": "8566278cd586e45ef8ba4fe0017a9ef1d685c218002e92f5e872088789b91dc0",
+      "xonly": "42b4104d9933236241353b657cdd2f0a518906201f32f6f96df31756c160c05d"
+    },
+    {
+      "hoosat_mainnet_address": "hoosat:qpxuclfnk8kk5qejeecs4ep8xj2xwfhjp8vrvkl4rj9v83vvtzyrcswtq9pnd",
+      "kaspa_testnet_address": "kaspatest:qpxuclfnk8kk5qejeecs4ep8xj2xwfhjp8vrvkl4rj9v83vvtzyrche88ryv4",
+      "master_public_key": "0330de2c8bc2010aaebbb647c5bac00eb8028f78d795f2cd4532bc6c504c0e01e7",
+      "name": "a/b c",
+      "owner_public_key": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+      "path": "owner/197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61/a/b c",
+      "tweak": "6fedf777839d8f61ecdd03378c0dacd5be91356cae6bce2ed5e041181745d22f",
+      "xonly": "4dcc7d33b1ed6a0332ce710ae42734946726f209d8365bf51c8ac3c58c58883c"
+    }
+  ]
+}

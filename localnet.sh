@@ -5,6 +5,7 @@
 #   ./localnet.sh address <network>        deposit address of the "main" key
 #   ./localnet.sh balance <network>        UTXOs and balance from the public API
 #   ./localnet.sh send <network> --to ADDR (--amount SOMPI | --all) [--dry-run]
+#   ./localnet.sh serve [args]             run tsn-coordinator (HTTP API for apps) on 127.0.0.1:7100
 #   ./localnet.sh down                     stop the nodes
 #
 # Networks: kaspa-testnet, kaspa-mainnet, hoosat-mainnet (hoosat-testnet needs --api URL).
@@ -72,6 +73,11 @@ case "$CMD" in
     done
     echo "nodes stopped (keys kept in $DIR)"
     ;;
+  serve)
+    start
+    echo "master public key (pin this in SDK clients): $(python3 -c 'import json,sys;print(json.load(sys.stdin)["verifying_key"])' < "$DIR/master.pub.json" 2>/dev/null || echo "see $DIR/master.pub.json")"
+    exec "$BIN/tsn-coordinator" --registry "$DIR/registry.json" --public "$DIR/master.pub.json" "$@"
+    ;;
   status)
     for i in 1 2 3 4 5; do if alive "$i"; then echo "node $i up"; else echo "node $i down"; fi; done
     ;;
@@ -90,7 +96,7 @@ case "$CMD" in
       --name "$NAME" --network "$net" "$@"
     ;;
   *)
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

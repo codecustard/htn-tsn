@@ -30,6 +30,24 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
+  sdk:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/ts/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      # Includes vectors shared with Rust (testdata/sdk-vectors.json).
+      - run: npm test
+
   demo:
     name: end-to-end demo
     runs-on: ubuntu-latest
@@ -41,6 +59,11 @@ jobs:
         with:
           go-version-file: tools/hoosat-verify/go.mod
           cache-dependency-path: tools/hoosat-verify/go.sum
-      # 5 local nodes, DKG, byzantine node, policy refusals, mock-API send,
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/ts/package-lock.json
+      # 5 local nodes, DKG, byzantine node, policy refusals, mock-API send, SDK -> coordinator,
       # then re-verification with rusty-kaspa and HTND's own Go engine.
       - run: ./demo.sh

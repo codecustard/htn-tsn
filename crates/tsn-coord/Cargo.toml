@@ -11,6 +11,7 @@ path = "src/bin/tsn-coordinator.rs"
 
 [dependencies]
 tsn-core.workspace = true
+tsn-net.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 tsn-core.workspace = true
+tsn-net.workspace = true
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true

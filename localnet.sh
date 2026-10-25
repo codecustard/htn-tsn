@@ -11,6 +11,7 @@
 #
 # Networks: kaspa-testnet, kaspa-mainnet, hoosat-mainnet (hoosat-testnet needs --api URL).
 #
+# Dev mode: plain HTTP, unsigned registry, unencrypted shares (see OPERATORS.md for production).
 # Keys live in ./localnet (gitignored) and are never recreated. Deleting that folder, or losing
 # 3 of the 5 node folders, loses every coin sent to its addresses. Unlike demo.sh, this script
 # never deletes anything.
@@ -30,7 +31,7 @@ alive() { [ -f "$DIR/node$1.pid" ] && kill -0 "$(cat "$DIR/node$1.pid")" 2>/dev/
 start() {
   for i in 1 2 3 4 5; do
     if alive "$i"; then continue; fi
-    nohup "$BIN/tsn-node" run --dir "$DIR/node$i" --registry "$DIR/registry.json" --port "$PORT_BASE$i" \
+    nohup "$BIN/tsn-node" run --dev --dir "$DIR/node$i" --registry "$DIR/registry.json" --port "$PORT_BASE$i" \
       >> "$DIR/node$i.log" 2>&1 &
     echo $! > "$DIR/node$i.pid"
   done
@@ -49,7 +50,7 @@ init() {
   mkdir -p "$DIR"
   local args=()
   for i in 1 2 3 4 5; do
-    "$BIN/tsn-node" keygen --dir "$DIR/node$i" --id "$i" >/dev/null
+    "$BIN/tsn-node" keygen --dev --dir "$DIR/node$i" --id "$i" >/dev/null
     args+=(--node "$DIR/node$i=http://127.0.0.1:$PORT_BASE$i")
   done
   "$BIN/tsn" registry --threshold 3 "${args[@]}" --out "$DIR/registry.json"
@@ -114,7 +115,7 @@ case "$CMD" in
       --name "$NAME" --network "$net" "$@"
     ;;
   *)
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

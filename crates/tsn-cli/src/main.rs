@@ -32,17 +32,48 @@ const AUTH_TTL_SECS: u64 = 600;
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+    /// Admin public key (hex) that must have signed the registry (commands that talk to nodes).
+    #[arg(long, global = true, env = "TSN_ADMIN")]
+    admin: Option<String>,
+    /// This coordinator's TLS identity (`tsn coordinator-new`), required by production nodes.
+    #[arg(long, global = true, env = "TSN_CLIENT_CERT")]
+    client_cert: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Build registry.json from node identities. Each --node is DIR=URL.
+    /// Build the registry from node identities. Each --node is IDENTITY=URL, where IDENTITY is
+    /// a node's identity.pub.json (or its directory) and URL is https://host:port.
     Registry {
         #[arg(long)]
         threshold: u16,
         #[arg(long = "node", required = true)]
         nodes: Vec<String>,
+        /// A coordinator the nodes accept: its coordinator.pub.json (repeatable).
+        #[arg(long = "coordinator")]
+        coordinators: Vec<PathBuf>,
+        /// Sign the registry with this admin key file (`tsn owner-new`).
+        #[arg(long)]
+        sign_with: Option<PathBuf>,
         #[arg(long, default_value = "registry.json")]
+        out: PathBuf,
+    },
+    /// Check every node in the registry: reachable over its pinned TLS, same registry, keys held.
+    /// Fails if any node is down or disagrees.
+    Status {
+        #[arg(long, default_value = "registry.json")]
+        registry: PathBuf,
+    },
+    /// Show a registry: digest, signer, nodes and coordinators.
+    RegistryInfo {
+        #[arg(long, default_value = "registry.json")]
+        registry: PathBuf,
+    },
+    /// Create a coordinator TLS identity; nodes accept it once its .pub.json is in the registry.
+    CoordinatorNew {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
         out: PathBuf,
     },
     /// Run distributed key generation across all registry nodes.
@@ -205,6 +236,22 @@ fn load_owner(p: &PathBuf) -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&bytes))
 }
 
+/// Writes a file readable only by its owner (Unix).
+fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+        f.write_all(data)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(std::fs::write(path, data)?)
+    }
+}
+
 fn load_public(p: &PathBuf) -> Result<PublicKeyPackage> {
     Ok(serde_json::from_slice(&std::fs::read(p).with_context(|| format!("reading {}", p.display()))?)?)
 }
@@ -270,25 +317,108 @@ fn print_line(line: String) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    match Cli::parse().cmd {
-        Cmd::Registry { threshold, nodes, out } => {
+    let cli = Cli::parse();
+    let cli_admin = cli.admin.clone();
+    let node_client = |registry: &PathBuf| -> Result<NodeClient> {
+        let reg = Registry::load_checked(registry, cli.admin.as_deref())?;
+        let tls = cli.client_cert.as_deref().map(tsn_net::load_identity).transpose()?.map(|(_, t)| t);
+        NodeClient::new(reg, tls.as_ref())
+    };
+    match cli.cmd {
+        Cmd::Registry { threshold, nodes, coordinators, sign_with, out } => {
             let mut entries = vec![];
             for spec in nodes {
-                let (dir, url) = spec.split_once('=').ok_or_else(|| anyhow!("--node must be DIR=URL"))?;
-                let ident: NodeIdentity =
-                    serde_json::from_slice(&std::fs::read(PathBuf::from(dir).join("identity.pub.json"))?)?;
-                entries.push(NodeEntry { id: ident.id, url: url.to_string(), x25519_pub: ident.x25519_pub });
+                let (path, url) = spec.split_once('=').ok_or_else(|| anyhow!("--node must be IDENTITY=URL"))?;
+                let path = PathBuf::from(path);
+                let file = if path.is_dir() { path.join("identity.pub.json") } else { path };
+                let ident: NodeIdentity = serde_json::from_slice(
+                    &std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?,
+                )?;
+                let tls =
+                    if url.starts_with("https://") {
+                        Some(ident.tls_cert_sha256.clone().ok_or_else(|| {
+                            anyhow!("{} has no TLS certificate; upgrade the node first", file.display())
+                        })?)
+                    } else {
+                        None
+                    };
+                entries.push(NodeEntry {
+                    id: ident.id,
+                    url: url.trim_end_matches('/').to_string(),
+                    x25519_pub: ident.x25519_pub,
+                    tls_cert_sha256: tls,
+                });
             }
             entries.sort_by_key(|e| e.id);
-            let n = entries.len() as u16;
-            if threshold < 2 || threshold > n {
-                bail!("threshold must be in 2..={n}");
+            let mut coords = vec![];
+            for f in coordinators {
+                coords.push(serde_json::from_slice::<CoordinatorEntry>(
+                    &std::fs::read(&f).with_context(|| format!("reading {}", f.display()))?,
+                )?);
             }
-            std::fs::write(&out, serde_json::to_vec_pretty(&Registry { threshold, nodes: entries })?)?;
-            println!("registry: {threshold}-of-{n} -> {}", out.display());
+            let reg = Registry { threshold, nodes: entries, coordinators: coords };
+            reg.validate()?;
+            let n = reg.n();
+            match sign_with {
+                Some(k) => {
+                    let signed = reg.sign(&load_owner(&k)?)?;
+                    std::fs::write(&out, serde_json::to_vec_pretty(&signed)?)?;
+                    println!("registry: {threshold}-of-{n}, signed by admin {} -> {}", signed.admin, out.display());
+                }
+                None => {
+                    std::fs::write(&out, serde_json::to_vec_pretty(&reg)?)?;
+                    println!("registry: {threshold}-of-{n}, unsigned (dev) -> {}", out.display());
+                }
+            }
+            println!("digest {}", reg.digest_hex()?);
+        }
+        Cmd::Status { registry } => {
+            let client = node_client(&registry)?;
+            let digest = client.registry.digest_hex()?;
+            let mut problems = 0;
+            for n in &client.registry.nodes {
+                match client.info(n.id).await {
+                    Ok(i) if i.registry == digest => println!("node {:<3} up    keys {:?}", n.id, i.keys),
+                    Ok(_) => {
+                        problems += 1;
+                        println!("node {:<3} up    but runs with a DIFFERENT registry", n.id)
+                    }
+                    Err(e) => {
+                        problems += 1;
+                        println!("node {:<3} DOWN  {e:#}", n.id)
+                    }
+                }
+            }
+            ensure!(problems == 0, "{problems} node(s) down or misconfigured");
+        }
+        Cmd::RegistryInfo { registry } => {
+            let reg = Registry::load_checked(&registry, cli_admin.as_deref())?;
+            let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&registry)?)?;
+            println!("digest     {}", reg.digest_hex()?);
+            match v.get("admin").and_then(|a| a.as_str()) {
+                Some(a) if cli_admin.is_some() => println!("signed by  {a} (matches --admin)"),
+                Some(a) => println!("signed by  {a} (pass --admin to require this key)"),
+                None => println!("signed by  nobody (dev registry)"),
+            }
+            println!("threshold  {}-of-{}", reg.threshold, reg.n());
+            for e in &reg.nodes {
+                println!("node {:<5} {}  tls {}", e.id, e.url, e.tls_cert_sha256.as_deref().unwrap_or("-"));
+            }
+            for c in &reg.coordinators {
+                println!("coordinator {}  tls {}", c.name, c.tls_cert_sha256);
+            }
+        }
+        Cmd::CoordinatorNew { name, out } => {
+            ensure!(!out.exists(), "{} exists", out.display());
+            let tls = tsn_net::TlsIdentity::generate(&name)?;
+            let entry = CoordinatorEntry { name: name.clone(), tls_cert_sha256: tls.fingerprint() };
+            write_private(&out, &serde_json::to_vec_pretty(&serde_json::json!({ "name": name, "tls": tls }))?)?;
+            let public = out.with_extension("pub.json");
+            std::fs::write(&public, serde_json::to_vec_pretty(&entry)?)?;
+            println!("coordinator {name}: tls {}; add {} to the registry", entry.tls_cert_sha256, public.display());
         }
         Cmd::Dkg { registry, key_id, out } => {
-            let client = NodeClient::new(Registry::load(&registry)?);
+            let client = node_client(&registry)?;
             let pkp = client.dkg(&key_id).await?;
             std::fs::write(&out, serde_json::to_vec_pretty(&pkp)?)?;
             println!("DKG complete: master key {}", hex::encode(pkp.verifying_key().serialize()?));
@@ -341,7 +471,7 @@ async fn main() -> Result<()> {
             out,
         } => {
             let network = Network::parse(&network)?;
-            let client = NodeClient::new(Registry::load(&registry)?);
+            let client = node_client(&registry)?;
             let public = load_public(&public)?;
             let (path, policy) = match &path_owner {
                 // Impersonation test: the path names one owner, the request is signed by another.
@@ -425,7 +555,7 @@ async fn main() -> Result<()> {
             out,
         } => {
             let network = Network::parse(&network)?;
-            let client = NodeClient::new(Registry::load(&registry)?);
+            let client = node_client(&registry)?;
             let public = load_public(&public)?;
             let (path, policy) = key_path(owner.as_ref(), policy.as_ref(), &name)?;
             let api = ChainApi::new(network, api)?;

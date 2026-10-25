@@ -15,10 +15,10 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$D"; }
 trap cleanup EXIT
 ARGS=()
-for i in 1 2 3 4 5; do $BIN/tsn-node keygen --dir "$D/node$i" --id "$i" >/dev/null; ARGS+=(--node "$D/node$i=http://127.0.0.1:721$i"); done
+for i in 1 2 3 4 5; do $BIN/tsn-node keygen --dev --dir "$D/node$i" --id "$i" >/dev/null; ARGS+=(--node "$D/node$i=http://127.0.0.1:721$i"); done
 $BIN/tsn registry --threshold 3 "${ARGS[@]}" --out "$D/registry.json" >/dev/null
 for i in 1 2 3 4 5; do
-  $BIN/tsn-node run --dir "$D/node$i" --registry "$D/registry.json" --port "721$i" > "$D/node$i.log" 2>&1 &
+  $BIN/tsn-node run --dev --dir "$D/node$i" --registry "$D/registry.json" --port "721$i" > "$D/node$i.log" 2>&1 &
   PIDS+=($!)
 done
 for i in 1 2 3 4 5; do until curl -sf "http://127.0.0.1:721$i/info" >/dev/null; do sleep 0.2; done; done

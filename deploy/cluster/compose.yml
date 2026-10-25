@@ -1,0 +1,70 @@
+# A 5-node, 3-of-5 network plus a coordinator, in production mode, on one Docker host.
+# Use ./cluster.sh (init, up, status, selftest, down) rather than calling compose directly.
+
+x-node: &node
+  image: ${TSN_IMAGE:-htn-tsn}
+  user: "${TSN_UID:-10001}:${TSN_GID:-10001}"
+  restart: unless-stopped
+  environment:
+    TSN_ADMIN: ${TSN_ADMIN:?run ./cluster.sh init first}
+    TSN_NODE_PASSPHRASE_FILE: /run/secrets/passphrase
+  command: ["run", "--dir", "/data", "--registry", "/etc/tsn/registry.json", "--listen", "0.0.0.0:7001"]
+
+services:
+  node1:
+    <<: *node
+    volumes: ["./data/node1:/data", "./data/registry.json:/etc/tsn/registry.json:ro"]
+    secrets: [{ source: node1, target: passphrase }]
+  node2:
+    <<: *node
+    volumes: ["./data/node2:/data", "./data/registry.json:/etc/tsn/registry.json:ro"]
+    secrets: [{ source: node2, target: passphrase }]
+  node3:
+    <<: *node
+    volumes: ["./data/node3:/data", "./data/registry.json:/etc/tsn/registry.json:ro"]
+    secrets: [{ source: node3, target: passphrase }]
+  node4:
+    <<: *node
+    volumes: ["./data/node4:/data", "./data/registry.json:/etc/tsn/registry.json:ro"]
+    secrets: [{ source: node4, target: passphrase }]
+  node5:
+    <<: *node
+    volumes: ["./data/node5:/data", "./data/registry.json:/etc/tsn/registry.json:ro"]
+    secrets: [{ source: node5, target: passphrase }]
+
+  # The HTTP API for apps, on 127.0.0.1:7100. Started by ./cluster.sh up after the DKG.
+  coordinator:
+    image: ${TSN_IMAGE:-htn-tsn}
+    user: "${TSN_UID:-10001}:${TSN_GID:-10001}"
+    restart: unless-stopped
+    profiles: ["app"]
+    entrypoint: ["tsn-coordinator"]
+    command:
+      - --registry=/cluster/registry.json
+      - --public=/cluster/master.pub.json
+      - --client-cert=/cluster/coordinator.json
+      - --listen=0.0.0.0:7100
+      - --cors-origin=http://localhost:8080
+    environment:
+      TSN_ADMIN: ${TSN_ADMIN}
+    volumes: ["./data:/cluster"]
+    ports: ["127.0.0.1:7100:7100"]
+
+  # `tsn` with the coordinator's certificate, on the cluster network: ./cluster.sh tsn ...
+  cli:
+    image: ${TSN_IMAGE:-htn-tsn}
+    user: "${TSN_UID:-10001}:${TSN_GID:-10001}"
+    profiles: ["tools"]
+    entrypoint: ["tsn"]
+    working_dir: /cluster
+    environment:
+      TSN_ADMIN: ${TSN_ADMIN}
+      TSN_CLIENT_CERT: /cluster/coordinator.json
+    volumes: ["./data:/cluster"]
+
+secrets:
+  node1: { file: ./data/secrets/node1.pass }
+  node2: { file: ./data/secrets/node2.pass }
+  node3: { file: ./data/secrets/node3.pass }
+  node4: { file: ./data/secrets/node4.pass }
+  node5: { file: ./data/secrets/node5.pass }

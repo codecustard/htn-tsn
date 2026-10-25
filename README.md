@@ -11,17 +11,20 @@ sign transactions only when the owner requests it and every node's policy allows
 - **Keys:** path-derived child keys (`owner/<ed25519 pubkey>/<name>`), addresses computable offline
 - **Checks per node:** owner signature or policy rules, input ownership, spend cap, own sighash, single-use nonces
 - **Robustness:** identifiable abort — a node sending a bad share is named and routed around
+- **Operators:** admin-signed registry, mutual TLS pinned to registered certificates, key shares
+  encrypted with each operator's passphrase; Docker image ([OPERATORS.md](OPERATORS.md))
 
 ## Run the demo
 
 ```bash
-./demo.sh          # needs Rust 1.80+; Go 1.22+ optional for the HTND cross-check
+./demo.sh          # needs Rust 1.91+; Go 1.22+ optional for the HTND cross-check
 ```
 
 The demo starts 5 nodes (node 2 is deliberately byzantine), runs DKG, derives addresses, then:
 
 | Step | Result |
 | --- | --- |
+| Production setup: signed registry, TLS, encrypted shares | Strangers without the registered coordinator certificate and a tampered registry are refused |
 | Kaspa payment | First subset includes node 2 → bad share identified → retried with [1,3,4] → valid |
 | Hoosat payment, signers [1,3,5] | Valid |
 | Node 5 killed | Still signs |
@@ -171,13 +174,30 @@ covers the exact transaction and expires (default 10 minutes); every node verifi
 Options: `--api-key` (or `TSN_API_KEY`), `--cors-origin`, `--rate-limit` (per IP per minute),
 `--max-fee`, `--api NETWORK=URL`. See [sdk/ts/README.md](sdk/ts/README.md).
 
+## Running with separate operators
+
+[OPERATORS.md](OPERATORS.md) walks through it: the admin signs the operator list, each operator runs
+one node in Docker with an encrypted key share, and nodes accept only the registered coordinator
+over TLS pinned to certificate fingerprints. To try the whole production setup on one Docker host:
+
+```bash
+docker build -t htn-tsn .
+deploy/cluster/cluster.sh init && deploy/cluster/cluster.sh up && deploy/cluster/cluster.sh selftest
+```
+
 ## Layout
 
 ```
-crates/tsn-core   addresses, sighash and mass (Kaspa + Hoosat), coin selection, derivation, sealing, owner auth
-crates/tsn-node   signer node (axum HTTP): DKG rounds, commit, share
+crates/tsn-core   addresses, sighash and mass (Kaspa + Hoosat), coin selection, derivation, sealing,
+                  auth and policies, signed registry, encrypted files
+crates/tsn-net    TLS between coordinators and nodes, pinned to registry fingerprints (both ways)
+crates/tsn-node   signer node: DKG rounds, commit, share; keygen and upgrade
 crates/tsn-coord  coordinator library (nodes, chain API, payments) + `tsn-coordinator` HTTP service
-crates/tsn-cli    `tsn`: registry, dkg, owner-new, address, balance, sign, send, verify
+crates/tsn-cli    `tsn`: registry, registry-info, coordinator-new, status, dkg, owner-new, address,
+                  balance, sign, send, verify
+Dockerfile        image with tsn-node, tsn and tsn-coordinator
+deploy/node       compose file for one operator's node
+deploy/cluster    5 nodes + coordinator in Docker, production mode, with a self-test
 sdk/ts            `@htn-tsn/sdk` TypeScript client
 testdata/         vectors shared by Rust and the SDK
 tools/hoosat-verify  Go program that validates a signed Hoosat tx with HTND's consensus engine
@@ -188,21 +208,24 @@ localnet.sh       persistent local network for real transactions
 
 ## Prototype shortcuts (not production)
 
-- Plain HTTP on localhost; production needs mTLS/Noise between all parties.
-- `tsn-coordinator` speaks plain HTTP; put it behind a TLS reverse proxy with `--api-key` before exposing it
-  (its rate limit then sees the proxy's IP).
-- Shares are stored unencrypted in each node's directory; production encrypts at rest or uses a TEE/HSM.
-- Registry is a local JSON file; production signs it (Phase 1) or puts it on-chain (Phase 3).
-- No nonce preprocessing pools, share refresh, or resharing yet (see design doc roadmap).
+- `tsn-coordinator` speaks plain HTTP to apps; put it behind a TLS reverse proxy with `--api-key`
+  before exposing it (its rate limit then sees the proxy's IP).
+- Node passphrases sit on the node machine so nodes restart unattended; a TEE or HSM would keep
+  shares out of reach of a compromised host.
+- The registry is a signed file; Phase 3 puts it on-chain. Changing operators needs a new DKG
+  (no resharing yet), and there are no nonce preprocessing pools or share refresh.
 - Only version-0, native-subnetwork, pay-to-pubkey (Schnorr) transactions with SIGHASH_ALL.
-- All 5 nodes run on one machine in `localnet.sh`, so it has no real threshold security yet.
+- `localnet.sh` runs all 5 nodes on one machine in dev mode, so it has no real threshold security.
 - Not audited. Use only testnet funds or amounts you can afford to lose.
 
 ## Tests
 
 ```bash
-cargo test                       # address vectors, coin selection and fees, auth, DKG + signing on both chains
+cargo test                       # address vectors, coin selection and fees, auth, policies, registry
+                                 # signing, encrypted files, pinned mutual TLS, DKG + signing on both chains
 (cd sdk/ts && npm ci && npm test) # SDK, including vectors generated by Rust
+deploy/cluster/cluster.sh selftest # Docker cluster in production mode (after init and up)
+tools/passkey-browser-test.sh    # passkey wallet page in Chrome with a virtual authenticator
 ```
 
 ## License

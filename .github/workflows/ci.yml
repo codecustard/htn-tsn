@@ -67,3 +67,25 @@ jobs:
       # 5 local nodes, DKG, byzantine node, policy refusals, mock-API send, SDK -> coordinator,
       # then re-verification with rusty-kaspa and HTND's own Go engine.
       - run: ./demo.sh
+
+  cluster:
+    name: Docker cluster (production mode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: htn-tsn
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # 5 nodes with encrypted shares, signed registry, pinned mutual TLS; DKG, signing on both
+      # chains, and refusals for strangers and a forged registry.
+      - run: deploy/cluster/cluster.sh init
+      - run: deploy/cluster/cluster.sh up
+      - run: deploy/cluster/cluster.sh selftest
+      - if: always()
+        run: deploy/cluster/cluster.sh logs --no-color | tail -100 || true

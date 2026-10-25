@@ -7,7 +7,8 @@
 //! - [`seal`]: node-to-node encryption for DKG round-2 packages (coordinator cannot read them).
 //! - [`auth`]: request authorization — the owner's signature, or approvals under a policy.
 //! - [`policy`]: policy keys — keys controlled by published rules (multisig, allowlists, time-locks).
-//! - [`proto`]: wire types shared by nodes and the coordinator.
+//! - [`proto`]: wire types shared by nodes and the coordinator, and the signed operator registry.
+//! - [`vault`]: passphrase-encrypted files for node secrets.
 
 pub mod address;
 pub mod auth;
@@ -17,6 +18,7 @@ pub mod derive;
 pub mod policy;
 pub mod proto;
 pub mod seal;
+pub mod vault;
 
 pub use frost_secp256k1_tr as frost;
 

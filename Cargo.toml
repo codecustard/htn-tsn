@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tsn-core", "crates/tsn-node", "crates/tsn-cli", "crates/tsn-coord"]
+members = ["crates/tsn-core", "crates/tsn-net", "crates/tsn-node", "crates/tsn-cli", "crates/tsn-coord"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 tsn-core = { path = "crates/tsn-core" }
 tsn-coord = { path = "crates/tsn-coord" }
+tsn-net = { path = "crates/tsn-net" }
 frost-secp256k1-tr = { version = "3", features = ["serde"] }
 # `internals` exposes the share constructors needed for path-based key derivation.
 frost-core = { version = "3", features = ["internals"] }
@@ -24,6 +25,7 @@ sha2 = "0.10"
 blake3 = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 chacha20poly1305 = "0.10"
+argon2 = "0.5"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 anyhow = "1"
 kaspa-consensus-core = "2.1"

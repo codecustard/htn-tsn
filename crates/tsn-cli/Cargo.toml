@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 tsn-core.workspace = true
 tsn-coord.workspace = true
+tsn-net.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -3,10 +3,13 @@
 //! The coordinator is untrusted. It relays messages, picks signers and aggregates shares, but it
 //! never holds a secret and can't make a node sign anything the owner and node policy don't allow.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use futures::future::{join_all, try_join_all};
 use serde::{de::DeserializeOwned, Serialize};
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 use tsn_core::{
     auth::Authorization,
     chain::{self, Tx},
@@ -15,13 +18,16 @@ use tsn_core::{
     identifier,
     proto::*,
 };
+use tsn_net::TlsIdentity;
 
 /// Progress messages ("input 0: signing with nodes [1, 3, 4]").
 pub type Log<'a> = &'a (dyn Fn(String) + Sync);
 
 pub struct NodeClient {
-    http: reqwest::Client,
+    /// One HTTP client per node: https nodes are pinned to their registered certificate.
+    http: HashMap<u16, reqwest::Client>,
     pub registry: Registry,
+    digest: String,
 }
 
 /// Outcome of one FROST session: a signature, or the nodes whose shares were invalid.
@@ -35,13 +41,28 @@ fn random_session_id() -> String {
 }
 
 impl NodeClient {
-    pub fn new(registry: Registry) -> Self {
-        Self { http: reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap(), registry }
+    /// `client` is this coordinator's TLS identity, required by nodes whose registry lists
+    /// coordinators.
+    pub fn new(registry: Registry, client: Option<&TlsIdentity>) -> Result<Self> {
+        let timeout = Duration::from_secs(10);
+        let mut http = HashMap::new();
+        for n in &registry.nodes {
+            let c = match &n.tls_cert_sha256 {
+                Some(fp) if n.url.starts_with("https://") => tsn_net::pinned_client(fp, client, timeout)?,
+                _ => reqwest::Client::builder().timeout(timeout).build()?,
+            };
+            http.insert(n.id, c);
+        }
+        Ok(Self { http, digest: registry.digest_hex()?, registry })
+    }
+
+    fn client(&self, id: u16) -> Result<&reqwest::Client> {
+        self.http.get(&id).ok_or_else(|| anyhow!("node {id} not in registry"))
     }
 
     async fn post<Req: Serialize, Resp: DeserializeOwned>(&self, id: u16, route: &str, body: &Req) -> Result<Resp> {
         let url = format!("{}{}", self.registry.node(id)?.url, route);
-        let r = self.http.post(&url).json(body).send().await.with_context(|| format!("node {id} unreachable"))?;
+        let r = self.client(id)?.post(&url).json(body).send().await.map_err(|e| unreachable(id, e))?;
         let status = r.status();
         let text = r.text().await?;
         if status.is_success() {
@@ -53,21 +74,37 @@ impl NodeClient {
         bail!("node {id}: {msg}")
     }
 
+    /// `/info` of one node.
+    pub async fn info(&self, id: u16) -> Result<InfoResp> {
+        let url = format!("{}/info", self.registry.node(id)?.url);
+        let r = self.client(id)?.get(&url).send().await.map_err(|e| unreachable(id, e))?;
+        ensure!(r.status().is_success(), "node {id}: HTTP {}", r.status());
+        Ok(r.json().await?)
+    }
+
     /// Node ids answering `/info`, in registry order.
     pub async fn live_nodes(&self) -> Vec<u16> {
-        let checks = self.registry.nodes.iter().map(|n| async move {
-            let ok = self.http.get(format!("{}/info", n.url)).send().await.map(|r| r.status().is_success());
-            (n.id, ok.unwrap_or(false))
-        });
+        let checks = self.registry.nodes.iter().map(|n| async move { (n.id, self.info(n.id).await.is_ok()) });
         join_all(checks).await.into_iter().filter(|(_, ok)| *ok).map(|(id, _)| id).collect()
     }
 
     /// Runs the three DKG rounds across every registry node; returns the agreed public package.
+    /// Every node must be reachable and run with the same registry as this coordinator.
     pub async fn dkg(&self, key_id: &str) -> Result<PublicKeyPackage> {
         let ids: Vec<u16> = self.registry.nodes.iter().map(|n| n.id).collect();
+        for id in &ids {
+            let info = self.info(*id).await?;
+            ensure!(
+                info.registry == self.digest,
+                "node {id} runs with a different registry ({}) than this coordinator ({}); give every node the same signed registry",
+                if info.registry.is_empty() { "unknown" } else { &info.registry[..12] },
+                &self.digest[..12]
+            );
+        }
         let mut r1 = BTreeMap::new();
         for id in &ids {
-            let resp: DkgPart1Resp = self.post(*id, "/dkg/part1", &DkgPart1Req { key_id: key_id.into() }).await?;
+            let req = DkgPart1Req { key_id: key_id.into(), registry: self.digest.clone() };
+            let resp: DkgPart1Resp = self.post(*id, "/dkg/part1", &req).await?;
             r1.insert(*id, resp.package);
         }
         let others =
@@ -207,4 +244,15 @@ impl NodeClient {
             Err(e) => bail!("aggregation failed: {e}"),
         }
     }
+}
+
+/// "node 3 unreachable: <root cause>" — TLS pinning failures name the certificate problem.
+fn unreachable(id: u16, e: reqwest::Error) -> anyhow::Error {
+    let mut cause = e.to_string();
+    let mut src = std::error::Error::source(&e);
+    while let Some(s) = src {
+        cause = s.to_string();
+        src = s.source();
+    }
+    anyhow!("node {id} unreachable: {cause}")
 }

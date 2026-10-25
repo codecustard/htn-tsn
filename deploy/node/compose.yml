@@ -1,0 +1,26 @@
+# One htn-tsn node, for an operator. See OPERATORS.md.
+#
+# In this folder:
+#   passphrase.txt   your passphrase (chmod 600; keep a copy somewhere else)
+#   node/            your node directory, created by keygen (encrypted)
+#   registry.json    the signed registry from the admin
+#   .env             TSN_ADMIN=<admin public key from the admin>
+#
+#   docker compose up -d && docker compose logs -f
+
+services:
+  node:
+    image: ${TSN_IMAGE:-htn-tsn}
+    user: "${TSN_UID:-10001}:${TSN_GID:-10001}"
+    restart: unless-stopped
+    environment:
+      TSN_ADMIN: ${TSN_ADMIN:?set TSN_ADMIN in .env}
+      TSN_NODE_PASSPHRASE_FILE: /run/secrets/passphrase
+    command: ["run", "--dir", "/data", "--registry", "/etc/tsn/registry.json", "--listen", "0.0.0.0:7001",
+              "--max-external-spend", "${TSN_MAX_SPEND:-10000000000}"]
+    volumes: ["./node:/data", "./registry.json:/etc/tsn/registry.json:ro"]
+    ports: ["7001:7001"]
+    secrets: [{ source: passphrase, target: passphrase }]
+
+secrets:
+  passphrase: { file: ./passphrase.txt }

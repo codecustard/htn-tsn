@@ -1,0 +1,10 @@
+# Never send keys or build output into the image build.
+localnet/
+demo-run/
+deploy/cluster/data/
+target/
+.git/
+sdk/ts/node_modules/
+sdk/ts/dist/
+tools/hoosat-verify/hoosat-verify
+**/*.bundle

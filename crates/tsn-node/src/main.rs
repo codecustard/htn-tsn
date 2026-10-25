@@ -6,6 +6,11 @@
 //!   3. enforces its spend policy on the full transaction,
 //!   4. recomputes the sighash itself and refuses if the coordinator's message differs,
 //!   5. burns the nonce for the session (single use), success or not.
+//!
+//! In production mode (the default) the node also requires: a registry signed by the pinned admin
+//! key, TLS with its registered certificate, a registered coordinator on every connection, and a
+//! passphrase that encrypts its identity and key shares on disk. `--dev` relaxes these for local
+//! testing.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use axum::{
@@ -15,11 +20,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -32,7 +38,9 @@ use tsn_core::{
     identifier,
     proto::*,
     seal,
+    vault::{self, KdfParams},
 };
+use tsn_net::TlsIdentity;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 #[derive(Parser)]
@@ -42,14 +50,51 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[derive(Args, Clone)]
+struct Secrets {
+    /// Passphrase that encrypts this node's identity and key shares on disk.
+    #[arg(long, env = "TSN_NODE_PASSPHRASE", hide_env_values = true)]
+    passphrase: Option<String>,
+    /// Read the passphrase from this file instead (e.g. a Docker secret).
+    #[arg(long, env = "TSN_NODE_PASSPHRASE_FILE", conflicts_with = "passphrase")]
+    passphrase_file: Option<PathBuf>,
+    /// Local testing: allow unencrypted files, plain HTTP and an unsigned registry.
+    #[arg(long)]
+    dev: bool,
+}
+
+impl Secrets {
+    fn passphrase(&self) -> Result<Option<String>> {
+        let p = match (&self.passphrase, &self.passphrase_file) {
+            (Some(p), _) => Some(p.clone()),
+            (None, Some(f)) => Some(
+                std::fs::read_to_string(f)
+                    .with_context(|| format!("reading {}", f.display()))?
+                    .trim_end_matches(['\n', '\r'])
+                    .to_string(),
+            ),
+            (None, None) => None,
+        };
+        match p {
+            Some(p) if p.len() < 12 => bail!("passphrase must be at least 12 characters"),
+            None if !self.dev => bail!(
+                "set TSN_NODE_PASSPHRASE or --passphrase-file (it encrypts this node's secrets), or use --dev for local testing"
+            ),
+            p => Ok(p),
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create this node's identity (X25519 key) in DIR.
+    /// Create this node's identity in DIR: an X25519 key (DKG) and a TLS certificate.
     Keygen {
         #[arg(long)]
         dir: PathBuf,
         #[arg(long)]
         id: u16,
+        #[command(flatten)]
+        secrets: Secrets,
     },
     /// Serve the signing API.
     Run {
@@ -57,14 +102,31 @@ enum Cmd {
         dir: PathBuf,
         #[arg(long)]
         registry: PathBuf,
+        /// Admin public key (hex) that must have signed the registry.
+        #[arg(long, env = "TSN_ADMIN")]
+        admin: Option<String>,
+        /// Address to listen on, e.g. 0.0.0.0:7001.
+        #[arg(long, required_unless_present = "port")]
+        listen: Option<SocketAddr>,
+        /// Shorthand for --listen 127.0.0.1:PORT.
         #[arg(long)]
-        port: u16,
+        port: Option<u16>,
         /// Max sompi a single request may send to addresses other than the key's own (change).
         #[arg(long, default_value_t = 10_000_000_000)]
         max_external_spend: u64,
         /// Demo only: return corrupted signature shares to exercise identifiable abort.
         #[arg(long)]
         byzantine: bool,
+        #[command(flatten)]
+        secrets: Secrets,
+    },
+    /// Upgrade an existing node directory: add a TLS certificate if missing and encrypt the
+    /// identity and key shares with the passphrase. Keys and addresses stay the same.
+    Upgrade {
+        #[arg(long)]
+        dir: PathBuf,
+        #[command(flatten)]
+        secrets: Secrets,
     },
 }
 
@@ -72,6 +134,73 @@ enum Cmd {
 struct IdentityFile {
     id: u16,
     x25519_secret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tls: Option<TlsIdentity>,
+}
+
+/// Reads and writes this node's secret files, encrypted when a passphrase is set.
+#[derive(Clone)]
+struct Store {
+    dir: PathBuf,
+    passphrase: Option<String>,
+}
+
+impl Store {
+    fn read(&self, file: &Path, label: &str) -> Result<Vec<u8>> {
+        let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+        if vault::is_sealed(&bytes) {
+            let p = self
+                .passphrase
+                .as_ref()
+                .ok_or_else(|| anyhow!("{} is encrypted; set the passphrase", file.display()))?;
+            vault::open(&bytes, p, label).map_err(|e| anyhow!("{}: {e}", file.display()))
+        } else {
+            ensure!(
+                self.passphrase.is_none(),
+                "{} is not encrypted; run `tsn-node upgrade --dir {}` to encrypt it",
+                file.display(),
+                self.dir.display()
+            );
+            Ok(bytes)
+        }
+    }
+
+    fn write(&self, file: &Path, label: &str, plaintext: &[u8]) -> Result<()> {
+        let data = match &self.passphrase {
+            Some(p) => vault::seal(plaintext, p, label, KdfParams::default())?,
+            None => plaintext.to_vec(),
+        };
+        let tmp = file.with_extension("tmp");
+        write_private(&tmp, &data)?;
+        std::fs::rename(&tmp, file)?;
+        Ok(())
+    }
+
+    fn identity(&self) -> Result<IdentityFile> {
+        let f = self.dir.join("identity.json");
+        ensure!(f.exists(), "missing {}; run keygen first", f.display());
+        Ok(serde_json::from_slice(&self.read(&f, "identity")?)?)
+    }
+
+    fn key_file(&self, key_id: &str) -> PathBuf {
+        self.dir.join("keys").join(format!("{key_id}.json"))
+    }
+}
+
+/// Writes a file readable only by its owner (Unix).
+fn write_private(path: &Path, data: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+        f.write_all(data)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(std::fs::write(path, data)?)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -84,7 +213,8 @@ struct Node {
     id: u16,
     secret: StaticSecret,
     registry: Registry,
-    dir: PathBuf,
+    registry_digest: String,
+    store: Store,
     max_external_spend: u64,
     byzantine: bool,
     keys: Mutex<HashMap<String, StoredKey>>,
@@ -145,10 +275,8 @@ impl Node {
     }
 
     fn persist(&self, key_id: &str, k: &StoredKey) -> Result<()> {
-        let dir = self.dir.join("keys");
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join(format!("{key_id}.json")), serde_json::to_vec_pretty(k)?)?;
-        Ok(())
+        std::fs::create_dir_all(self.store.dir.join("keys"))?;
+        self.store.write(&self.store.key_file(key_id), &format!("key:{key_id}"), &serde_json::to_vec_pretty(k)?)
     }
 }
 
@@ -157,6 +285,14 @@ fn require(cond: bool, msg: impl std::fmt::Display) -> Result<()> {
         Ok(())
     } else {
         Err(anyhow!("{msg}"))
+    }
+}
+
+fn short(h: &str) -> String {
+    if h.is_empty() {
+        "(none)".into()
+    } else {
+        format!("{}…", &h[..h.len().min(12)])
     }
 }
 
@@ -170,12 +306,25 @@ fn valid_key_id(k: &str) -> Result<()> {
 
 async fn info(State(n): State<Shared>) -> ApiResult<InfoResp> {
     let keys = n.keys.lock().unwrap().keys().cloned().collect();
-    Ok(Json(InfoResp { id: n.id, x25519_pub: hex::encode(PublicKey::from(&n.secret).as_bytes()), keys }))
+    Ok(Json(InfoResp {
+        id: n.id,
+        x25519_pub: hex::encode(PublicKey::from(&n.secret).as_bytes()),
+        keys,
+        registry: n.registry_digest.clone(),
+    }))
 }
 
 async fn dkg_part1(State(n): State<Shared>, Json(req): Json<DkgPart1Req>) -> ApiResult<DkgPart1Resp> {
     valid_key_id(&req.key_id)?;
     require(n.key(&req.key_id).is_err(), format!("key {} already exists", req.key_id))?;
+    require(
+        req.registry == n.registry_digest,
+        format!(
+            "coordinator's registry {} differs from this node's {}",
+            short(&req.registry),
+            short(&n.registry_digest)
+        ),
+    )?;
     let (secret, package) = dkg::part1(identifier(n.id)?, n.registry.n(), n.registry.threshold, OsRng)?;
     n.dkg_r1.lock().unwrap().insert(req.key_id.clone(), secret);
     n.log(format!("DKG {}: round 1 (n={}, t={})", req.key_id, n.registry.n(), n.registry.threshold));
@@ -284,50 +433,145 @@ async fn sign_share(State(n): State<Shared>, Json(req): Json<ShareReq>) -> ApiRe
     Ok(Json(ShareResp { share }))
 }
 
-fn load_identity(dir: &Path) -> Result<IdentityFile> {
-    let s = std::fs::read_to_string(dir.join("identity.json")).context("missing identity.json; run keygen first")?;
-    Ok(serde_json::from_str(&s)?)
+fn load_keys(store: &Store) -> Result<HashMap<String, StoredKey>> {
+    let mut keys = HashMap::new();
+    if let Ok(rd) = std::fs::read_dir(store.dir.join("keys")) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(key_id) = name.strip_suffix(".json") else { continue };
+            let k = store.read(&e.path(), &format!("key:{key_id}"))?;
+            keys.insert(key_id.to_string(), serde_json::from_slice(&k)?);
+        }
+    }
+    Ok(keys)
+}
+
+fn write_public_identity(dir: &Path, id: &IdentityFile) -> Result<NodeIdentity> {
+    let secret = StaticSecret::from(x25519_bytes(&id.x25519_secret)?);
+    let public = NodeIdentity {
+        id: id.id,
+        x25519_pub: hex::encode(PublicKey::from(&secret).as_bytes()),
+        tls_cert_sha256: id.tls.as_ref().map(|t| t.fingerprint()),
+    };
+    std::fs::write(dir.join("identity.pub.json"), serde_json::to_vec_pretty(&public)?)?;
+    Ok(public)
+}
+
+fn x25519_bytes(h: &str) -> Result<[u8; 32]> {
+    hex::decode(h)?.try_into().map_err(|_| anyhow!("bad x25519 secret"))
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Keygen { dir, id } => {
+        Cmd::Keygen { dir, id, secrets } => {
+            let passphrase = secrets.passphrase()?;
             std::fs::create_dir_all(&dir)?;
             ensure!(!dir.join("identity.json").exists(), "identity already exists in {}", dir.display());
             let secret = StaticSecret::random_from_rng(OsRng);
-            let public = hex::encode(PublicKey::from(&secret).as_bytes());
-            std::fs::write(
-                dir.join("identity.json"),
-                serde_json::to_vec_pretty(&IdentityFile { id, x25519_secret: hex::encode(secret.to_bytes()) })?,
-            )?;
-            std::fs::write(
-                dir.join("identity.pub.json"),
-                serde_json::to_vec_pretty(&NodeIdentity { id, x25519_pub: public.clone() })?,
-            )?;
-            println!("node {id} identity: {public}");
+            let ident = IdentityFile {
+                id,
+                x25519_secret: hex::encode(secret.to_bytes()),
+                tls: Some(TlsIdentity::generate(&format!("tsn-node-{id}"))?),
+            };
+            let store = Store { dir: dir.clone(), passphrase };
+            store.write(&dir.join("identity.json"), "identity", &serde_json::to_vec_pretty(&ident)?)?;
+            let public = write_public_identity(&dir, &ident)?;
+            println!(
+                "node {id}: x25519 {} tls {} ({}); send {} to the admin",
+                public.x25519_pub,
+                public.tls_cert_sha256.unwrap_or_default(),
+                if store.passphrase.is_some() { "encrypted" } else { "UNENCRYPTED, dev only" },
+                dir.join("identity.pub.json").display()
+            );
         }
-        Cmd::Run { dir, registry, port, max_external_spend, byzantine } => {
-            let ident = load_identity(&dir)?;
-            let bytes: [u8; 32] = hex::decode(&ident.x25519_secret)?.try_into().map_err(|_| anyhow!("bad secret"))?;
-            let registry = Registry::load(&registry)?;
-            let secret = StaticSecret::from(bytes);
+        Cmd::Upgrade { dir, secrets } => {
+            let passphrase = secrets.passphrase()?;
+            let old = Store { dir: dir.clone(), passphrase: passphrase.clone() };
+            let read_any = |f: &Path, label: &str| -> Result<Vec<u8>> {
+                let b = std::fs::read(f)?;
+                if vault::is_sealed(&b) {
+                    old.read(f, label)
+                } else {
+                    Ok(b)
+                }
+            };
+            let mut ident: IdentityFile = serde_json::from_slice(&read_any(&dir.join("identity.json"), "identity")?)?;
+            if ident.tls.is_none() {
+                ident.tls = Some(TlsIdentity::generate(&format!("tsn-node-{}", ident.id))?);
+                println!("added a TLS certificate");
+            }
+            let mut keys = vec![];
+            if let Ok(rd) = std::fs::read_dir(dir.join("keys")) {
+                for e in rd.flatten() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if let Some(key_id) = name.strip_suffix(".json") {
+                        keys.push((e.path(), key_id.to_string(), read_any(&e.path(), &format!("key:{key_id}"))?));
+                    }
+                }
+            }
+            let store = Store { dir: dir.clone(), passphrase };
+            store.write(&dir.join("identity.json"), "identity", &serde_json::to_vec_pretty(&ident)?)?;
+            for (path, key_id, data) in &keys {
+                store.write(path, &format!("key:{key_id}"), data)?;
+            }
+            let public = write_public_identity(&dir, &ident)?;
+            println!(
+                "node {}: {} key share(s) {}; tls {}. Update its registry entry from {}",
+                public.id,
+                keys.len(),
+                if store.passphrase.is_some() { "encrypted" } else { "left unencrypted (dev)" },
+                public.tls_cert_sha256.unwrap_or_default(),
+                dir.join("identity.pub.json").display()
+            );
+        }
+        Cmd::Run { dir, registry, admin, listen, port, max_external_spend, byzantine, secrets } => {
+            let store = Store { dir: dir.clone(), passphrase: secrets.passphrase()? };
+            let dev = secrets.dev;
+            let ident = store.identity()?;
+            let registry = match (&admin, dev) {
+                (Some(a), _) => Registry::load_pinned(&registry, a)?,
+                (None, true) => Registry::load(&registry)?,
+                (None, false) => {
+                    bail!("pass --admin <hex> (the admin's public key) so only a registry it signed is accepted")
+                }
+            };
+            let secret = StaticSecret::from(x25519_bytes(&ident.x25519_secret)?);
             ensure!(
                 registry.x25519(ident.id)? == *PublicKey::from(&secret).as_bytes(),
                 "registry entry does not match this node's identity"
             );
-            let mut keys = HashMap::new();
-            if let Ok(rd) = std::fs::read_dir(dir.join("keys")) {
-                for e in rd.flatten() {
-                    let name = e.file_name().to_string_lossy().trim_end_matches(".json").to_string();
-                    keys.insert(name, serde_json::from_slice(&std::fs::read(e.path())?)?);
-                }
-            }
+            let entry = registry.node(ident.id)?.clone();
+            let tls = if entry.url.starts_with("https://") {
+                let t = ident
+                    .tls
+                    .clone()
+                    .ok_or_else(|| anyhow!("registry says https but this node has no TLS certificate; run upgrade"))?;
+                ensure!(
+                    entry.tls_cert_sha256.as_deref() == Some(t.fingerprint().as_str()),
+                    "registry's TLS fingerprint for node {} is not this node's certificate",
+                    ident.id
+                );
+                ensure!(
+                    dev || !registry.coordinators.is_empty(),
+                    "registry lists no coordinators, so anyone could reach this node"
+                );
+                Some(tsn_net::server_config(
+                    &t,
+                    &registry.coordinators.iter().map(|c| c.tls_cert_sha256.clone()).collect::<Vec<_>>(),
+                )?)
+            } else {
+                ensure!(dev, "node {} has a plain-http URL in the registry; production nodes use https", ident.id);
+                None
+            };
+            let keys = load_keys(&store)?;
+            let addr = listen.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(7001))));
             let node = Arc::new(Node {
                 id: ident.id,
                 secret,
+                registry_digest: registry.digest_hex()?,
                 registry,
-                dir,
+                store,
                 max_external_spend,
                 byzantine,
                 keys: Mutex::new(keys),
@@ -344,9 +588,23 @@ async fn main() -> Result<()> {
                 .route("/sign/commit", post(sign_commit))
                 .route("/sign/share", post(sign_share))
                 .with_state(node.clone());
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-            node.log(format!("listening on 127.0.0.1:{port}{}", if byzantine { " (byzantine)" } else { "" }));
-            axum::serve(listener, app).await?;
+            let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
+            node.log(format!(
+                "listening on {addr} ({}{}), registry {}, {} key(s){}",
+                if tls.is_some() { "TLS" } else { "plain HTTP, dev" },
+                match (&tls, node.registry.coordinators.len()) {
+                    (Some(_), 0) => ", any client".to_string(),
+                    (Some(_), c) => format!(", {c} registered coordinator(s)"),
+                    _ => String::new(),
+                },
+                short(&node.registry_digest),
+                node.keys.lock().unwrap().len(),
+                if byzantine { " (byzantine)" } else { "" }
+            ));
+            match tls {
+                Some(cfg) => tsn_net::serve_tls(listener, cfg, app).await?,
+                None => axum::serve(listener, app).await?,
+            }
         }
     }
     Ok(())

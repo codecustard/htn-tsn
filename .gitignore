@@ -4,3 +4,4 @@ demo-run.log
 tools/hoosat-verify/hoosat-verify
 .DS_Store
 localnet/
+deploy/cluster/data/

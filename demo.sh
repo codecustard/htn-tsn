@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end demo: 5 nodes, 3-of-5 threshold, one byzantine node, Kaspa + Hoosat signing.
+# Runs in production mode: signed registry, pinned mutual TLS, encrypted key shares.
 set -euo pipefail
 cd "$(dirname "$0")"
 export RUST_BACKTRACE=0
@@ -13,28 +14,49 @@ cleanup() { for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
-expect_fail() { if "$@" > "$DEMO/last.log" 2>&1; then echo "UNEXPECTED SUCCESS"; exit 1; else echo "refused as expected -> $(grep -m1 -E "^Error|error:" "$DEMO/last.log" | sed -E "s/^Error: //")"; fi; }
+expect_fail() { if "$@" > "$DEMO/last.log" 2>&1; then echo "UNEXPECTED SUCCESS"; exit 1; else echo "refused as expected -> $(grep -m1 -E "^Error|error:|DOWN" "$DEMO/last.log" | sed -E "s/^Error: //")"; fi; }
 
-step "1. Five operators create node identities"
+step "1. Admin, five operators and a coordinator create their identities"
+# Production setup, all on one machine for the demo: each operator's identity and key shares are
+# encrypted with their own passphrase; the admin signs the registry; nodes accept only TLS
+# connections from the registered coordinator.
+$BIN/tsn owner-new --out "$DEMO/admin.json" >/dev/null
+export TSN_ADMIN=$(grep -o '"ed25519_public": *"[0-9a-f]*"' "$DEMO/admin.json" | grep -o '[0-9a-f]\{64\}')
+echo "admin key $TSN_ADMIN"
+pass() { echo "demo passphrase for node $1"; }
 NODE_ARGS=()
 for i in 1 2 3 4 5; do
-  $BIN/tsn-node keygen --dir "$DEMO/node$i" --id "$i"
-  NODE_ARGS+=(--node "$DEMO/node$i=http://127.0.0.1:700$i")
+  TSN_NODE_PASSPHRASE=$(pass $i) $BIN/tsn-node keygen --dir "$DEMO/node$i" --id "$i"
+  NODE_ARGS+=(--node "$DEMO/node$i/identity.pub.json=https://127.0.0.1:700$i")
 done
-$BIN/tsn registry --threshold 3 "${NODE_ARGS[@]}" --out "$DEMO/registry.json"
+$BIN/tsn coordinator-new --name demo-coordinator --out "$DEMO/coordinator.json"
+export TSN_CLIENT_CERT="$DEMO/coordinator.json"
+$BIN/tsn registry --threshold 3 "${NODE_ARGS[@]}" --coordinator "$DEMO/coordinator.pub.json" \
+  --sign-with "$DEMO/admin.json" --out "$DEMO/registry.json"
 
 step "2. Start nodes (node 2 is byzantine: it returns corrupted shares)"
 for i in 1 2 3 4 5; do
   extra=(); [ "$i" = 2 ] && extra=(--byzantine)
-  $BIN/tsn-node run --dir "$DEMO/node$i" --registry "$DEMO/registry.json" --port "700$i" \
+  TSN_NODE_PASSPHRASE=$(pass $i) $BIN/tsn-node run --dir "$DEMO/node$i" --registry "$DEMO/registry.json" --port "700$i" \
     --max-external-spend 10000000000 "${extra[@]}" > "$DEMO/node$i.log" 2>&1 &
   PIDS+=($!)
 done
-for i in 1 2 3 4 5; do until curl -sf "http://127.0.0.1:700$i/info" >/dev/null; do sleep 0.2; done; done
-echo "all 5 nodes up"
+until $BIN/tsn status --registry "$DEMO/registry.json" > "$DEMO/status.log" 2>&1; do sleep 0.3; done
+cat "$DEMO/status.log"
+echo "-- strangers can't reach the nodes: no certificate, or one the registry doesn't list"
+expect_fail env -u TSN_CLIENT_CERT $BIN/tsn status --registry "$DEMO/registry.json"
+$BIN/tsn coordinator-new --name stranger --out "$DEMO/stranger.json" >/dev/null
+expect_fail env TSN_CLIENT_CERT="$DEMO/stranger.json" $BIN/tsn status --registry "$DEMO/registry.json"
+echo "-- a registry not signed by the admin is refused"
+sed 's/700[1]/7666/' "$DEMO/registry.json" > "$DEMO/tampered-registry.json"
+expect_fail $BIN/tsn registry-info --registry "$DEMO/tampered-registry.json"
 
 step "3. Distributed key generation (no dealer, no one sees the key)"
 $BIN/tsn dkg --registry "$DEMO/registry.json" --key-id master --out "$DEMO/master.pub.json"
+
+echo "-- key shares on disk are encrypted:"
+head -c 160 "$DEMO/node1/keys/master.json"; echo " ..."
+if grep -q signing_share "$DEMO"/node*/keys/master.json; then echo "PLAINTEXT SHARE ON DISK"; exit 1; fi
 
 step "4. Owners: alice (key holder), bob (recipient), mallory (attacker)"
 for o in alice bob mallory; do printf '%-8s' "$o"; $BIN/tsn owner-new --out "$DEMO/$o.json"; done

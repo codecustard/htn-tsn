@@ -53,6 +53,12 @@ use tsn_core::{
 struct Args {
     #[arg(long, default_value = "registry.json")]
     registry: PathBuf,
+    /// Admin public key (hex) that must have signed the registry.
+    #[arg(long, env = "TSN_ADMIN")]
+    admin: Option<String>,
+    /// This coordinator's TLS identity (`tsn coordinator-new`), required by production nodes.
+    #[arg(long, env = "TSN_CLIENT_CERT")]
+    client_cert: Option<PathBuf>,
     /// Master public key package written by `tsn dkg`.
     #[arg(long)]
     public: PathBuf,
@@ -352,7 +358,8 @@ async fn send_inner(app: &App, r: SendReq) -> Result<Value> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let a = Args::parse();
-    let registry = Registry::load(&a.registry)?;
+    let registry = Registry::load_checked(&a.registry, a.admin.as_deref())?;
+    let client = a.client_cert.as_deref().map(tsn_net::load_identity).transpose()?.map(|(_, t)| t);
     let public: PublicKeyPackage = serde_json::from_slice(&std::fs::read(&a.public)?)?;
 
     let mut overrides: HashMap<Network, String> = HashMap::new();
@@ -368,7 +375,7 @@ async fn main() -> Result<()> {
     }
 
     let app = Arc::new(App {
-        nodes: NodeClient::new(registry),
+        nodes: NodeClient::new(registry, client.as_ref())?,
         public,
         key_id: a.key_id,
         apis,

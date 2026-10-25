@@ -1,5 +1,7 @@
 # htn-tsn — threshold signing network prototype for Hoosat and Kaspa
 
+[![CI](https://github.com/codecustard/htn-tsn/actions/workflows/ci.yml/badge.svg)](https://github.com/codecustard/htn-tsn/actions/workflows/ci.yml)
+
 A threshold signing network for Hoosat and Kaspa. Independent nodes jointly hold one master key
 that no single node ever has. From it they derive a separate key for each owner and name, and they
 sign transactions only when the owner requests it and every node's policy allows it.

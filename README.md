@@ -115,18 +115,30 @@ rpId; `http://localhost` is allowed for development), and that the device verifi
 ]}
 ```
 
-A phone wallet: the passkey alone pays up to 20 coins; more needs the recovery key too. Try it
-with your own Touch ID against the local network:
+A phone wallet: the passkey alone pays up to 20 coins; more needs the recovery key too.
+
+**Passkey wallets (nothing to download).** The SDK's wallet functions make a policy that is fully
+determined by one passkey: the passkey alone (up to an optional limit), or an optional recovery key.
+The settings are stored in the passkey itself (its 58-byte user handle), and the passkey's public
+key is recovered from its signatures. So a user creates a wallet with one Face ID prompt, and on
+any other device signs in with one prompt and finds it. Right after sign-in there are two candidate
+keys; the address holding coins identifies the wallet, and the next approval (a payment, or one
+extra prompt before showing a deposit address) settles it. Nodes see an ordinary policy.
+
+Try it with your own Touch ID against the local network:
 
 ```bash
 ./localnet.sh passkey     # coordinator + test page; open the printed http://localhost:8080/... URL
 ```
 
-The page creates a passkey, makes a policy key (passkey, optional limit, plus your localnet owner
-key as a backup), shows its address and balance, and sends with a Touch ID prompt. Fund the address
-from the localnet key (`./localnet.sh send hoosat-mainnet --to <address> --amount ...`). If the
-passkey is lost, the owner key still moves the coins:
-`tsn send --registry localnet/registry.json --public localnet/master.pub.json --policy phone.policy.json --name phone --approver localnet/owner.json ...`.
+Create a wallet, fund it from the localnet key (`./localnet.sh send hoosat-mainnet --amount 100000000 --to <address>`),
+wait about 3 minutes, then send with Touch ID. "Sign out on this device" and sign in again (or use
+another browser with the same synced passkey) to see the wallet come back. If the passkey is lost,
+the localnet owner key (the default recovery key) still moves the coins: save the policy from the
+page's developer view as `wallet.policy.json`, then
+`tsn send --registry localnet/registry.json --public localnet/master.pub.json --policy wallet.policy.json --name wallet --approver localnet/owner.json ...`.
+`tools/passkey-browser-test.sh` runs the same page in Chrome with a virtual authenticator across
+three simulated devices.
 A passkey is bound to its domain: one made on `localhost` can't approve for `wallet.example.com`.
 
 ## Signing service for apps

@@ -28,3 +28,19 @@ export {
 } from "./passkey.js";
 export { TsnClient, type ClientOptions, type PayRequest, type PolicyPayRequest } from "./client.js";
 export { bytesToHex, hexToBytes } from "./bytes.js";
+export {
+  WALLET_KEY_NAME,
+  encodeSettings,
+  decodeSettings,
+  walletPolicy,
+  walletPolicies,
+  recoverPasskeyKeys,
+  narrowWallet,
+  walletPasskey,
+  createWallet,
+  signInWallet,
+  confirmWallet,
+  approveWithWallet,
+  type WalletSettings,
+  type PasskeyWallet,
+} from "./wallet.js";

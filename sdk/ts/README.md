@@ -52,25 +52,37 @@ creates `newPolicyRequest(...)`, and sends it to each approver, who runs `checkI
 
 ## Passkeys
 
-Passkeys (Face ID, Touch ID, Windows Hello, security keys) can be policy signers. In the browser:
+Passkeys (Face ID, Touch ID, Windows Hello, security keys) can be policy signers. The simplest use
+is a passkey wallet, which needs no storage: settings live in the passkey and its public key is
+recovered from its signatures.
 
 ```ts
-import { createPasskey, approveWithPasskey } from "@htn-tsn/sdk";
+import { createWallet, signInWallet, confirmWallet, approveWithWallet, walletPolicy, WALLET_KEY_NAME } from "@htn-tsn/sdk";
 
-// Once: create it and store { credentialId, rpId, signer } with the user's account.
-const passkey = await createPasskey({ rpId: "wallet.example.com", rpName: "My Wallet", userName: "alice" });
-const policy: Policy = { version: 1, clauses: [{ signers: { k: 1, of: [passkey.signer] }, max_per_tx: "2000000000" }] };
+// New user: one prompt. Limit and recovery key are optional.
+let wallet = await createWallet({ rpId: "wallet.example.com", rpName: "My Wallet", userName: "alice",
+                                  settings: { limit: "2000000000", recovery: backupKeyHex } });
 
-// Each payment: the approve callback gets the checked request; the prompt signs that exact transaction.
-await client.payWithPolicy({ policy, name: "phone", network, to, amount, approve: (req) => approveWithPasskey(req, passkey) });
+// Any other device: one prompt; the device lists the user's passkeys for this site.
+wallet = await signInWallet({ rpId: "wallet.example.com" });
+// wallet.keys has two candidates until the next signature. The one whose address holds coins is
+// the wallet; confirmWallet(wallet) settles it with one more prompt (do that before showing a
+// deposit address).
+
+const key = wallet.keys[0];   // or the funded candidate
+const policy = walletPolicy(wallet.rpId, key, wallet.settings);
+await client.payWithPolicy({ policy, name: WALLET_KEY_NAME, network, to, amount,
+  approve: async (req) => { const r = await approveWithWallet(req, wallet, key); wallet = r.wallet; return r.approval; } });
 ```
 
+For other policies, `createPasskey` returns `{ credentialId, rpId, signer }`; put `signer` in any
+clause and approve with `approveWithPasskey(request, passkey)`. Keep such policies: unlike a wallet,
+they can't be rebuilt from the passkey.
+
 `rpId` must be the page's domain (or a parent of it); the nodes reject assertions from any other
-origin. The public key is only available when the passkey is created, so keep the policy (it holds
-the signer id); without it the address can't be spent from. `softPasskey(rpId, origin)` makes the
-same assertions in software, for tests. `examples/passkey.html` is a working test page
-(`./localnet.sh passkey` at the repo root), and `examples/passkey-pay.mjs` pays with a software
-passkey from Node.
+origin. `softPasskey(rpId, origin)` makes the same assertions in software, for tests.
+`examples/passkey.html` is a working wallet page (`./localnet.sh passkey` at the repo root), and
+`examples/passkey-pay.mjs` pays with a software passkey from Node.
 
 ## What the SDK checks
 
@@ -97,6 +109,7 @@ The coordinator is untrusted, so the SDK never takes its word for anything that 
 | `policyId`, `policyPath`, `policyAddress`, `normalizePolicy` | Policy keys, offline |
 | `TsnClient.payWithPolicy`, `newPolicyRequest`, `approve`, `policyAuthorization` | Spending from policy keys |
 | `createPasskey`, `approveWithPasskey`, `passkeySigner`, `softPasskey` | Passkey signers (browser WebAuthn; software for tests) |
+| `createWallet`, `signInWallet`, `confirmWallet`, `approveWithWallet`, `walletPolicy` | Passkey wallets: sign in anywhere, nothing stored |
 
 Amounts are `bigint` in arguments and decimal strings in transactions, because JSON numbers lose
 precision above 2^53.

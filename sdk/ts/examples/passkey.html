@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Passkey Wallet Test</title>
 <!--
-  Passkey test page for htn-tsn: a policy key approved with Face ID / Touch ID.
+  Passkey wallet test page for htn-tsn: a wallet controlled by Face ID / Touch ID, found again on
+  any device by signing in with the passkey (nothing to download).
   Start it with `./localnet.sh passkey` and open the printed http://localhost:8080/... URL.
   Manually: build the SDK (npm run build), run tsn-coordinator with --cors-origin http://localhost:8080,
   and serve sdk/ts on localhost:8080 (python3 -m http.server 8080 --directory sdk/ts).
@@ -26,6 +27,7 @@
     --accent: #6cc196; --accent-ink: #0d1f15; --warn: #e3a64a; --bad: #ef7d84; --mono-bg: #262624;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
   main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
   h1 { font-size: 22px; margin: 0 0 4px; }
@@ -50,19 +52,24 @@
   .kv dd { margin: 0; overflow-wrap: anywhere; }
   pre { background: var(--mono-bg); border-radius: 6px; padding: 10px; overflow-x: auto; font-size: 12px; margin: 10px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   pre#policy-json { white-space: pre; overflow-wrap: normal; }
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 560px) { .split { grid-template-columns: 1fr; } }
+  .pane { border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .pane h3 { font-size: 14px; margin: 0; }
+  details { margin-top: 12px; font-size: 13px; }
+  summary { cursor: pointer; color: var(--muted); }
   .note { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
   .warn { color: var(--warn); }
   .bad { color: var(--bad); }
   .ok { color: var(--accent); }
   #review { border: 1px solid var(--accent); border-radius: 8px; padding: 12px; margin-top: 14px; }
-  #review[hidden] { display: none; }
   a { color: var(--accent); }
 </style>
 </head>
 <body>
 <main>
   <h1>Passkey wallet test</h1>
-  <p class="sub">A threshold key whose policy only lets your passkey spend. The nodes check the Face ID / Touch ID assertion before signing.</p>
+  <p class="sub">A threshold-signed wallet controlled by Face ID / Touch ID. Sign in on any device with the passkey and the wallet is there; the nodes check every approval.</p>
 
   <section id="s-connect">
     <h2><span class="n">1</span> Coordinator</h2>
@@ -82,44 +89,47 @@
     <p id="connect-out" class="note"></p>
   </section>
 
-  <section id="s-passkey" class="off">
-    <h2><span class="n">2</span> Passkey</h2>
-    <p class="note" style="margin-top:0">Created on <span class="mono">localhost</span>. Your device keeps the private key; this page only learns the public key.</p>
-    <div class="buttons">
-      <button id="create" class="primary">Create passkey</button>
-      <button id="forget">Forget passkey on this page</button>
+  <section id="s-wallet" class="off">
+    <h2><span class="n">2</span> Wallet</h2>
+    <div id="no-wallet" class="split">
+      <div class="pane">
+        <h3>New wallet</h3>
+        <label for="limit">Face ID limit per payment (coins, blank = none)</label>
+        <input id="limit" inputmode="decimal" placeholder="none">
+        <label class="check"><input type="checkbox" id="use-recovery" checked> Recovery key can also spend</label>
+        <input id="recovery" class="mono" placeholder="ed25519 public key hex" style="margin-top:6px">
+        <label for="label">Name in your passkey list</label>
+        <input id="label" value="HTN wallet">
+        <div class="buttons"><button id="create" class="primary">Create wallet</button></div>
+      </div>
+      <div class="pane">
+        <h3>Have one?</h3>
+        <p class="note">Sign in with its passkey. Settings come back from the passkey; nothing else is needed.</p>
+        <div class="buttons"><button id="signin" class="primary">Sign in with passkey</button></div>
+      </div>
     </div>
-    <dl class="kv" id="passkey-kv" hidden>
-      <dt>Signer id</dt><dd class="mono" id="signer"></dd>
-    </dl>
-    <p id="passkey-out" class="note"></p>
-  </section>
-
-  <section id="s-policy" class="off">
-    <h2><span class="n">3</span> Policy</h2>
-    <div class="row">
-      <div><label for="limit">Passkey limit per transaction (coins, blank = none)</label><input id="limit" inputmode="decimal" placeholder="none"></div>
-      <div><label for="name">Key name</label><input id="name" value="phone"></div>
+    <div id="has-wallet" hidden>
+      <dl class="kv">
+        <dt>Status</dt><dd id="status"></dd>
+        <dt>Address</dt><dd class="mono" id="addr"></dd>
+        <dt>Balance</dt><dd id="balance">-</dd>
+        <dt>Rules</dt><dd id="rules"></dd>
+      </dl>
+      <div class="buttons">
+        <button id="confirm" class="primary" hidden>Show deposit address</button>
+        <button id="refresh">Refresh</button>
+        <button id="signout">Sign out on this device</button>
+      </div>
+      <details>
+        <summary>Developer view: policy and signer</summary>
+        <pre id="policy-json"></pre>
+      </details>
     </div>
-    <label class="check"><input type="checkbox" id="use-recovery" checked> Recovery key can also spend (the localnet owner key; backup if you lose the passkey)</label>
-    <input id="recovery" class="mono" placeholder="ed25519 public key hex" style="margin-top:6px">
-    <div class="buttons">
-      <button id="make-policy" class="primary">Create policy key</button>
-      <button id="download">Download policy.json</button>
-      <button id="reset-policy">Start over</button>
-    </div>
-    <p class="note warn">The address depends on the exact policy. Keep policy.json: without it (and the passkey or recovery key) the coins can't be spent.</p>
-    <dl class="kv" id="policy-kv" hidden>
-      <dt>Address</dt><dd class="mono" id="addr"></dd>
-      <dt>Balance</dt><dd id="balance">-</dd>
-    </dl>
-    <pre id="policy-json" hidden></pre>
-    <div class="buttons"><button id="refresh" disabled>Refresh balance</button></div>
-    <p id="policy-out" class="note"></p>
+    <p id="wallet-out" class="note"></p>
   </section>
 
   <section id="s-send" class="off">
-    <h2><span class="n">4</span> Send with the passkey</h2>
+    <h2><span class="n">3</span> Send</h2>
     <label for="to">To</label><input id="to" class="mono" placeholder="hoosat:… / kaspatest:…">
     <div class="row">
       <div><label for="amount">Amount (coins, or "all")</label><input id="amount" inputmode="decimal" placeholder="0.5"></div>
@@ -142,16 +152,17 @@
 { "imports": { "@noble/curves/": "../node_modules/@noble/curves/", "@noble/hashes/": "../node_modules/@noble/hashes/" } }
 </script>
 <script type="module">
-import { TsnClient, createPasskey, approveWithPasskey, signerId, PREFIX } from "../dist/index.js";
+import { TsnClient, createWallet, signInWallet, confirmWallet, approveWithWallet, walletPolicy, WALLET_KEY_NAME, PREFIX } from "../dist/index.js";
 
+const RP_ID = "localhost";
 const $ = (id) => document.getElementById(id);
 const store = {
-  get(k) { try { return JSON.parse(localStorage.getItem("htn-tsn-passkey:" + k)); } catch { return null; } },
-  set(k, v) { try { localStorage.setItem("htn-tsn-passkey:" + k, JSON.stringify(v)); } catch {} },
-  del(k) { try { localStorage.removeItem("htn-tsn-passkey:" + k); } catch {} },
+  get(k) { try { return JSON.parse(localStorage.getItem("htn-tsn-wallet:" + k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem("htn-tsn-wallet:" + k, JSON.stringify(v)); } catch {} },
+  del(k) { try { localStorage.removeItem("htn-tsn-wallet:" + k); } catch {} },
 };
 const say = (id, text, cls = "") => { const el = $(id); el.textContent = text; el.className = "note " + cls; };
-const fail = (id) => (e) => say(id, String(e?.message ?? e), "bad");
+const errText = (e) => String(e?.message ?? e);
 
 const COIN = 100_000_000n;
 function toSompi(s) {
@@ -161,8 +172,11 @@ function toSompi(s) {
 }
 const coins = (sompi) => {
   const v = BigInt(sompi);
-  return `${v / COIN}.${(v % COIN).toString().padStart(8, "0")}`.replace(/\.?0+$/, "") || "0";
+  const frac = (v % COIN).toString().padStart(8, "0").replace(/0+$/, "");
+  return frac ? `${v / COIN}.${frac}` : `${v / COIN}`;
 };
+const net = () => $("network").value;
+const unit = () => (net().startsWith("hoosat") ? "HTN" : "KAS");
 
 const q = new URLSearchParams(location.search);
 $("master").value = q.get("master") ?? store.get("master") ?? "";
@@ -171,106 +185,115 @@ $("url").value = store.get("url") ?? $("url").value;
 $("network").value = store.get("network") ?? $("network").value;
 
 let client = null;
-let passkey = store.get("passkey");
-let policy = store.get("policy");
+let wallet = store.get("wallet");
+let balances = {}; // candidate key -> bigint sompi
 
-if (location.hostname !== "localhost") {
-  say("connect-out", `Open this page at http://localhost:8080 (not ${location.host}): the passkey is bound to "localhost".`, "bad");
+if (location.hostname !== RP_ID) {
+  say("connect-out", `Open this page at http://localhost:8080 (not ${location.host}): passkeys are bound to "localhost".`, "bad");
+}
+
+function setWallet(w) {
+  wallet = w;
+  if (w) store.set("wallet", w); else store.del("wallet");
+}
+
+/** The wallet's candidate keys with their policies and addresses (one once settled). */
+function candidates() {
+  return wallet.keys.map((key) => {
+    const policy = walletPolicy(wallet.rpId, key, wallet.settings);
+    return { key, policy, ...client.policyAddress(policy, WALLET_KEY_NAME, net()) };
+  });
+}
+
+/** Key that pays: the settled key, or the only candidate holding coins. */
+function payingKey() {
+  if (wallet.keys.length === 1) return wallet.keys[0];
+  const funded = wallet.keys.filter((k) => (balances[k] ?? 0n) > 0n);
+  return funded.length === 1 ? funded[0] : null;
 }
 
 $("connect").onclick = async () => {
   try {
     client = new TsnClient({ baseUrl: $("url").value.trim(), masterPublicKey: $("master").value.trim() });
     const info = await client.info();
-    store.set("url", $("url").value.trim()); store.set("master", $("master").value.trim()); store.set("network", $("network").value);
+    store.set("url", $("url").value.trim()); store.set("master", $("master").value.trim()); store.set("network", net());
     say("connect-out", `Connected: ${info.threshold}-of-${info.nodes} network, key ${info.key_id}.`, "ok");
-    $("s-passkey").classList.remove("off");
-    render();
+    render(); refresh();
   } catch (e) {
-    fail("connect-out")(e);
-    if (String(e).includes("Failed to fetch")) say("connect-out", "Can't reach the coordinator. Is it running with --cors-origin http://localhost:8080?", "bad");
+    client = null;
+    say("connect-out", errText(e).includes("fetch") ? "Can't reach the coordinator. Is it running with --cors-origin http://localhost:8080?" : errText(e), "bad");
+    render();
   }
 };
-$("network").onchange = () => { store.set("network", $("network").value); render(); };
+$("network").onchange = () => { store.set("network", net()); balances = {}; render(); refresh(); };
 
 $("create").onclick = async () => {
   try {
-    say("passkey-out", "Waiting for Touch ID…");
-    passkey = await createPasskey({ rpId: "localhost", rpName: "htn-tsn test", userName: `htn-tsn ${new Date().toISOString().slice(0, 16)}` });
-    store.set("passkey", passkey);
-    say("passkey-out", "Passkey created.", "ok");
-    render();
-  } catch (e) { fail("passkey-out")(e); }
-};
-$("forget").onclick = () => {
-  passkey = null; store.del("passkey");
-  say("passkey-out", "Forgotten here. The passkey itself stays in your keychain until you delete it there.");
-  render();
+    const settings = {};
+    if ($("limit").value.trim()) settings.limit = toSompi($("limit").value).toString();
+    if ($("use-recovery").checked) { settings.recovery = $("recovery").value.trim(); store.set("recovery", settings.recovery); }
+    say("wallet-out", "Waiting for Face ID / Touch ID…");
+    setWallet(await createWallet({ rpId: RP_ID, rpName: "htn-tsn wallet test", userName: $("label").value.trim() || "HTN wallet", settings }));
+    say("wallet-out", "Wallet created. Fund the address, then refresh.", "ok");
+    balances = {}; render(); refresh();
+  } catch (e) { say("wallet-out", errText(e), "bad"); }
 };
 
-function buildPolicy() {
-  const clause = { signers: { k: 1, of: [passkey.signer] } };
-  const limit = $("limit").value.trim();
-  if (limit) clause.max_per_tx = toSompi(limit).toString();
-  const clauses = [clause];
-  if ($("use-recovery").checked) {
-    const pub = $("recovery").value.trim();
-    clauses.push({ signers: { k: 1, of: [signerId(pub)] } });
-    store.set("recovery", pub);
-  }
-  return { version: 1, clauses };
-}
-$("make-policy").onclick = () => {
+$("signin").onclick = async () => {
   try {
-    policy = { policy: buildPolicy(), name: $("name").value.trim() || "phone" };
-    store.set("policy", policy);
-    say("policy-out", "Policy key created. Fund the address, then refresh.", "ok");
+    say("wallet-out", "Waiting for Face ID / Touch ID…");
+    setWallet(await signInWallet({ rpId: RP_ID }));
+    say("wallet-out", "Signed in.", "ok");
+    balances = {}; render(); refresh();
+  } catch (e) { say("wallet-out", errText(e), "bad"); }
+};
+
+$("confirm").onclick = async () => {
+  try {
+    say("wallet-out", "Waiting for Face ID / Touch ID…");
+    setWallet(await confirmWallet(wallet));
+    say("wallet-out", "Confirmed.", "ok");
     render(); refresh();
-  } catch (e) { fail("policy-out")(e); }
+  } catch (e) { say("wallet-out", errText(e), "bad"); }
 };
-$("reset-policy").onclick = () => {
-  policy = null; store.del("policy");
-  say("policy-out", "Cleared. Coins at the old address need its policy.json to move.", "warn");
+
+$("signout").onclick = () => {
+  setWallet(null); balances = {};
+  say("wallet-out", "Signed out here. The passkey stays in your keychain; sign in again any time.");
   render();
-};
-$("download").onclick = () => {
-  if (!policy) return;
-  const blob = new Blob([JSON.stringify(policy.policy, null, 2) + "\n"], { type: "application/json" });
-  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: `${policy.name}.policy.json` });
-  a.click(); URL.revokeObjectURL(a.href);
 };
 
 async function refresh() {
-  if (!client || !policy) return;
+  if (!client || !wallet) return;
   try {
-    const net = $("network").value;
-    const { path } = client.policyAddress(policy.policy, policy.name, net);
-    const b = await client.balanceOfPath(path, net);
-    $("balance").textContent = `${coins(b.balance)} (${b.utxos.length} coin${b.utxos.length === 1 ? "" : "s"})`;
-  } catch (e) { $("balance").textContent = String(e?.message ?? e); }
+    for (const c of candidates()) balances[c.key] = BigInt((await client.balanceOfPath(c.path, net())).balance);
+  } catch (e) { say("wallet-out", errText(e), "bad"); }
+  render();
 }
 $("refresh").onclick = refresh;
 
 function render() {
-  const hasPk = !!passkey;
-  $("passkey-kv").hidden = !hasPk;
-  if (hasPk) $("signer").textContent = passkey.signer;
-  $("create").disabled = hasPk;
-  $("s-policy").classList.toggle("off", !(client && hasPk));
-  const ready = !!(client && hasPk && policy);
-  $("policy-kv").hidden = !policy;
-  $("policy-json").hidden = !policy;
-  $("make-policy").disabled = !!policy;
-  $("download").disabled = !policy;
-  $("refresh").disabled = !ready;
-  for (const id of ["limit", "name", "use-recovery", "recovery"]) $(id).disabled = !!policy;
-  if (policy) {
-    $("policy-json").textContent = JSON.stringify(policy.policy, null, 2);
-    if (client) $("addr").textContent = client.policyAddress(policy.policy, policy.name, $("network").value).address;
-    if (policy.policy.clauses[0].signers.of[0] !== passkey?.signer) say("policy-out", "This policy belongs to a different passkey than the one on this page.", "warn");
-  }
-  $("s-send").classList.toggle("off", !ready);
-  $("to").placeholder = `${PREFIX[$("network").value]}:…`;
+  $("s-wallet").classList.toggle("off", !client);
+  $("no-wallet").hidden = !!wallet;
+  $("has-wallet").hidden = !wallet;
+  const key = wallet && client ? payingKey() : null;
+  $("s-send").classList.toggle("off", !(client && key));
+  $("to").placeholder = `${PREFIX[net()]}:…`;
+  if (!wallet) return;
+  const settled = wallet.keys.length === 1;
+  const s = wallet.settings;
+  $("rules").textContent = [
+    s.limit ? `Face ID alone: up to ${coins(s.limit)} ${unit()} per payment` : "Face ID alone: any amount",
+    s.recovery ? `Recovery key ${s.recovery.slice(0, 8)}…${s.recovery.slice(-4)} can also spend` : "No recovery key",
+  ].join(". ") + ".";
+  $("confirm").hidden = settled;
+  if (!client) return;
+  const cs = candidates();
+  const mine = cs.find((c) => c.key === key);
+  $("status").textContent = settled ? "Ready" : key ? "Signed in (found by balance)" : "Signed in";
+  $("addr").textContent = settled ? cs[0].address : "Confirm to show (one more Face ID, once per device)";
+  $("balance").textContent = mine && balances[mine.key] !== undefined ? `${coins(balances[mine.key])} ${unit()}` : key || settled ? "-" : `0 ${unit()}`;
+  $("policy-json").textContent = mine ? JSON.stringify(mine.policy, null, 2) : "Not settled yet. Candidates:\n" + cs.map((c) => c.policy.clauses[0].signers.of[0]).join("\n");
 }
 
 let pending = null;
@@ -279,50 +302,52 @@ $("send").onclick = async () => {
   out.hidden = false; out.className = ""; out.textContent = "Preparing…";
   $("send").disabled = true;
   try {
-    const net = $("network").value;
+    const key = payingKey();
+    if (!key) throw new Error("No coins found yet; confirm the wallet and fund its address first.");
+    const policy = walletPolicy(wallet.rpId, key, wallet.settings);
+    const from = client.policyAddress(policy, WALLET_KEY_NAME, net()).address;
     const raw = $("amount").value.trim();
     const result = await client.payWithPolicy({
-      policy: policy.policy, name: policy.name, network: net, to: $("to").value.trim(),
+      policy, name: WALLET_KEY_NAME, network: net(), to: $("to").value.trim(),
       amount: raw === "all" ? "all" : toSompi(raw), broadcast: !$("dry").checked,
       // Called with the exact transaction the nodes will sign, after the SDK checked it against
       // the intent. The passkey prompt runs from the Approve click (Safari wants a user gesture).
       approve: (request) => new Promise((resolve, reject) => {
-        const ins = request.tx.inputs.reduce((s, i) => s + BigInt(i.amount), 0n);
-        const outs = request.tx.outputs.reduce((s, o) => s + BigInt(o.amount), 0n);
-        $("review-kv").innerHTML = "";
+        const ins = request.tx.inputs.reduce((n, i) => n + BigInt(i.amount), 0n);
+        const outs = request.tx.outputs.reduce((n, o) => n + BigInt(o.amount), 0n);
+        $("review-kv").replaceChildren();
         const add = (k, v) => {
           const dt = document.createElement("dt"); dt.textContent = k;
           const dd = document.createElement("dd"); dd.className = "mono"; dd.textContent = v;
           $("review-kv").append(dt, dd);
         };
-        for (const o of request.tx.outputs) add(o.address === $("addr").textContent ? "Change" : "Pay", `${coins(o.amount)} → ${o.address}`);
-        add("Fee", `${coins(ins - outs)}`);
+        for (const o of request.tx.outputs) add(o.address === from ? "Change" : "Pay", `${coins(o.amount)} ${unit()} → ${o.address}`);
+        add("Fee", `${coins(ins - outs)} ${unit()}`);
         add("Expires", new Date(request.expires_at * 1000).toLocaleTimeString());
         $("review").hidden = false;
         out.textContent = "Waiting for your approval…";
-        pending = { request, resolve, reject };
+        pending = { request, key, resolve, reject };
       }),
     });
     out.className = "ok";
-    out.textContent = [
-      ...result.log,
-      `fee ${coins(result.fee)}`,
-      result.txid ? `txid ${result.txid}` : "signed, not broadcast",
-      result.explorer ?? "",
-    ].join("\n");
+    out.textContent = [...result.log, `fee ${coins(result.fee)} ${unit()}`, result.txid ? `txid ${result.txid}` : "signed, not broadcast", result.explorer ?? ""].join("\n");
     refresh();
   } catch (e) {
-    out.className = "bad"; out.textContent = String(e?.message ?? e);
+    out.className = "bad"; out.textContent = errText(e);
   } finally {
     $("review").hidden = true; $("send").disabled = false; pending = null;
   }
 };
 $("approve").onclick = async () => {
   if (!pending) return;
-  const { request, resolve, reject } = pending;
+  const { request, key, resolve, reject } = pending;
   $("approve").disabled = true;
-  try { resolve(await approveWithPasskey(request, passkey)); }
-  catch (e) { reject(e); }
+  try {
+    const r = await approveWithWallet(request, wallet, key);
+    setWallet(r.wallet); // the approval also settles the wallet's key
+    render();
+    resolve(r.approval);
+  } catch (e) { reject(e); }
   finally { $("approve").disabled = false; }
 };
 $("cancel").onclick = () => pending?.reject(new Error("cancelled"));

@@ -52,16 +52,27 @@ export interface Passkey {
   signer: string;
 }
 
-/** Browser: create a passkey on `rpId` (the page's domain, or "localhost" in development). */
-export async function createPasskey(opts: { rpId: string; rpName: string; userName: string }): Promise<Passkey> {
-  const userId = crypto.getRandomValues(new Uint8Array(16));
+/**
+ * Browser: create a passkey on `rpId` (the page's domain, or "localhost" in development).
+ * `userId` (at most 64 bytes, default random) comes back at every sign-in with a discoverable passkey.
+ */
+export async function createPasskey(opts: {
+  rpId: string;
+  rpName: string;
+  userName: string;
+  userId?: Uint8Array;
+  /** Require a discoverable passkey (sign-in without knowing its id). */
+  discoverable?: boolean;
+}): Promise<Passkey> {
+  const userId = buffer(opts.userId ?? crypto.getRandomValues(new Uint8Array(16)));
+  if (userId.length > 64) throw new Error("passkey user id is limited to 64 bytes");
   const cred = (await navigator.credentials.create({
     publicKey: {
       rp: { id: opts.rpId, name: opts.rpName },
       user: { id: userId, name: opts.userName, displayName: opts.userName },
       challenge: crypto.getRandomValues(new Uint8Array(32)),
       pubKeyCredParams: [{ type: "public-key", alg: -7 }], // ES256 (P-256)
-      authenticatorSelection: { residentKey: "preferred", userVerification: "required" },
+      authenticatorSelection: { residentKey: opts.discoverable ? "required" : "preferred", userVerification: "required" },
       timeout: 120_000,
     },
   })) as PublicKeyCredential | null;
@@ -103,21 +114,29 @@ export async function approveWithPasskey(request: PolicyRequest, passkey: Passke
  * Never use it for real funds; a real passkey keeps its key in secure hardware.
  */
 export function softPasskey(rpId: string, origin: string, secretKey: Uint8Array = p256.utils.randomSecretKey()) {
-  const signer = passkeySigner(rpId, bytesToHex(p256.getPublicKey(secretKey, true)));
+  const publicKey = bytesToHex(p256.getPublicKey(secretKey, true));
+  const signer = passkeySigner(rpId, publicKey);
+  /** A WebAuthn assertion over `challenge`, as `navigator.credentials.get` returns it. */
+  function assert(challenge: Uint8Array, flags = 0x05) {
+    const authenticatorData = concatBytes(sha256(utf8ToBytes(rpId)), Uint8Array.of(flags), new Uint8Array(4));
+    const clientDataJSON = utf8ToBytes(
+      JSON.stringify({ type: "webauthn.get", challenge: base64url(challenge), origin, crossOrigin: false }),
+    );
+    const signature = p256.sign(concatBytes(authenticatorData, sha256(clientDataJSON)), secretKey, { format: "der" });
+    return { authenticatorData, clientDataJSON, signature };
+  }
   return {
     signer,
+    publicKey,
+    assert,
     approve(request: PolicyRequest, flags = 0x05): Approval {
       const digest = requestDigest(request.keyId, request.path, request.request_id, request.expires_at, request.tx);
-      const authenticatorData = concatBytes(sha256(utf8ToBytes(rpId)), Uint8Array.of(flags), new Uint8Array(4));
-      const clientDataJSON = utf8ToBytes(
-        JSON.stringify({ type: "webauthn.get", challenge: base64url(digest), origin, crossOrigin: false }),
-      );
-      const sig = p256.sign(concatBytes(authenticatorData, sha256(clientDataJSON)), secretKey, { format: "der" });
+      const a = assert(digest, flags);
       return {
         signer,
-        sig: bytesToHex(sig),
-        authenticator_data: bytesToHex(authenticatorData),
-        client_data_json: bytesToHex(clientDataJSON),
+        sig: bytesToHex(a.signature),
+        authenticator_data: bytesToHex(a.authenticatorData),
+        client_data_json: bytesToHex(a.clientDataJSON),
       };
     },
   };

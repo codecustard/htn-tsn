@@ -75,11 +75,30 @@ step "11. Two nodes are not enough"
 expect_fail "${SIGN[@]}" --owner "$DEMO/alice.json" --name treasury --network kaspa-testnet \
   --to "$BOB_KAS" --amount 100000000 --signers 1,3
 
-step "12. Independent re-verification of the saved transactions"
+if command -v python3 >/dev/null; then
+  step "12. Real-payment path (tsn send) against a mock API: 2 UTXOs, coin selection, fee, broadcast"
+  for net in kaspa-testnet hoosat-mainnet; do
+    ADDR=$($BIN/tsn address --public "$DEMO/master.pub.json" --owner "$DEMO/alice.json" --name treasury --network $net)
+    SCRIPT=$($BIN/tsn address --public "$DEMO/master.pub.json" --owner "$DEMO/alice.json" --name treasury --network $net --script)
+    python3 tools/mock_api.py --port 7099 --address "$ADDR" --script "$SCRIPT" \
+      --utxos 2000000000,1500000000 --save "$DEMO/submitted-$net.json" &
+    MOCK=$!; PIDS+=($MOCK)
+    until curl -sf "http://127.0.0.1:7099/info/blockdag" >/dev/null; do sleep 0.2; done
+    TO=$($BIN/tsn address --public "$DEMO/master.pub.json" --owner "$DEMO/bob.json" --name main --network $net)
+    $BIN/tsn send --registry "$DEMO/registry.json" --public "$DEMO/master.pub.json" --owner "$DEMO/alice.json" --name treasury --network $net --api http://127.0.0.1:7099 \
+      --to "$TO" --amount 2500000000 --out "$DEMO/sent-$net.json"
+    kill $MOCK; wait $MOCK 2>/dev/null || true
+  done
+fi
+
+step "13. Independent re-verification of the saved transactions"
 $BIN/tsn verify --tx "$DEMO/signed-kaspa.json"
 $BIN/tsn verify --tx "$DEMO/signed-hoosat.json"
+for f in "$DEMO"/sent-*.json; do [ -f "$f" ] && $BIN/tsn verify --tx "$f"; done
 if command -v go >/dev/null; then
-  (cd tools/hoosat-verify && go build -o hoosat-verify .) && tools/hoosat-verify/hoosat-verify "$DEMO/signed-hoosat.json"
+  (cd tools/hoosat-verify && go build -o hoosat-verify .)
+  tools/hoosat-verify/hoosat-verify "$DEMO/signed-hoosat.json"
+  [ -f "$DEMO/sent-hoosat-mainnet.json" ] && tools/hoosat-verify/hoosat-verify "$DEMO/sent-hoosat-mainnet.json"
 fi
 
 step "Node logs (what each node decided)"

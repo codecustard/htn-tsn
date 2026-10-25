@@ -8,8 +8,11 @@ use ed25519_dalek::SigningKey;
 use rand::{rngs::OsRng, RngCore};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+mod api;
+
 use tsn_core::{
     address, auth,
+    build::{self, Amount},
     chain::{self, Network, Tx, TxInput, TxOutput},
     derive,
     frost::{self, keys::PublicKeyPackage},
@@ -59,6 +62,9 @@ enum Cmd {
         name: String,
         #[arg(long)]
         network: String,
+        /// Print the address's scriptPublicKey (hex) instead of the address.
+        #[arg(long)]
+        script: bool,
     },
     /// Build and threshold-sign a payment from OWNER's key NAME (spends a mock UTXO).
     Sign {
@@ -90,6 +96,58 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Show the UTXOs and balance of OWNER's key NAME, read from a public API.
+    Balance {
+        #[arg(long)]
+        public: PathBuf,
+        #[arg(long)]
+        owner: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        network: String,
+        /// REST API base URL (defaults: api.kaspa.org, api-tn10.kaspa.org, api.explorer-eu.hoosat.network).
+        #[arg(long)]
+        api: Option<String>,
+    },
+    /// Spend real UTXOs of OWNER's key NAME: select coins, threshold-sign, verify, broadcast.
+    Send {
+        #[arg(long, default_value = "registry.json")]
+        registry: PathBuf,
+        #[arg(long)]
+        public: PathBuf,
+        #[arg(long, default_value = "master")]
+        key_id: String,
+        #[arg(long)]
+        owner: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        network: String,
+        #[arg(long)]
+        to: String,
+        /// Amount in sompi (1 KAS/HTN = 100,000,000 sompi).
+        #[arg(long, required_unless_present = "all", conflicts_with = "all")]
+        amount: Option<u64>,
+        /// Send the whole balance minus the fee.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        api: Option<String>,
+        /// Fee rate in sompi per gram of mass (default: API estimate, else chain minimum).
+        #[arg(long)]
+        feerate: Option<f64>,
+        /// Refuse to pay more than this fee, in sompi. Guards against a bad fee estimate from the API.
+        #[arg(long, default_value_t = 10_000_000)]
+        max_fee: u64,
+        #[arg(long)]
+        signers: Option<String>,
+        /// Build, sign and verify, but don't broadcast.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Verify a signed transaction file against chain rules.
     Verify {
         #[arg(long)]
@@ -111,6 +169,10 @@ fn load_owner(p: &PathBuf) -> Result<SigningKey> {
 
 fn load_public(p: &PathBuf) -> Result<PublicKeyPackage> {
     Ok(serde_json::from_slice(&std::fs::read(p).with_context(|| format!("reading {}", p.display()))?)?)
+}
+
+fn coins(sompi: u64) -> String {
+    format!("{}.{:08}", sompi / 100_000_000, sompi % 100_000_000)
 }
 
 fn random_hex(n: usize) -> String {
@@ -180,6 +242,47 @@ impl Client {
             }
         }
         result.ok_or_else(|| anyhow!("no nodes"))
+    }
+
+    /// Threshold-signs every input of `tx`, routing around nodes that send invalid shares.
+    async fn sign_inputs(
+        &self,
+        key_id: &str,
+        path: &str,
+        owner: &SigningKey,
+        public: &PublicKeyPackage,
+        tx: &mut Tx,
+        signers: Option<&str>,
+    ) -> Result<()> {
+        let t = self.registry.threshold as usize;
+        for idx in 0..tx.inputs.len() {
+            let mut pool: Vec<u16> = match signers {
+                Some(s) => s.split(',').map(|x| x.trim().parse()).collect::<std::result::Result<_, _>>()?,
+                None => self.live_nodes().await,
+            };
+            let fixed = signers.is_some();
+            let sig = loop {
+                // With an explicit signer set the request goes to the nodes as-is, so a
+                // too-small set is refused by the nodes themselves rather than by this client.
+                if !fixed && pool.len() < t {
+                    bail!("only {} usable signers ({pool:?}); threshold is {t}", pool.len());
+                }
+                let chosen: Vec<u16> = if fixed { pool.clone() } else { pool[..t].to_vec() };
+                println!("input {idx}: signing with nodes {chosen:?}");
+                match self.sign_once(key_id, path, owner, public, tx, idx, &chosen).await? {
+                    Ok(sig) => break sig,
+                    Err(culprits) => {
+                        println!("input {idx}: invalid shares from {culprits:?} (identifiable abort) - excluding and retrying");
+                        if fixed {
+                            bail!("fixed signer set contains bad nodes {culprits:?}");
+                        }
+                        pool.retain(|id| !culprits.contains(id));
+                    }
+                }
+            };
+            tx.inputs[idx].signature_script = hex::encode(chain::signature_script(&sig));
+        }
+        Ok(())
     }
 
     /// One FROST session for one input. Returns the signature or the culprits of an invalid share.
@@ -261,11 +364,15 @@ async fn main() -> Result<()> {
             std::fs::write(&out, serde_json::to_vec_pretty(&f)?)?;
             println!("owner {}", f.ed25519_public);
         }
-        Cmd::Address { public, owner, name, network } => {
+        Cmd::Address { public, owner, name, network, script } => {
             let network = Network::parse(&network)?;
             let path = auth::owner_path(&load_owner(&owner)?.verifying_key(), &name);
             let xonly = derive::child_xonly(load_public(&public)?.verifying_key(), &path)?;
-            println!("{}", address::encode(network.prefix(), address::VERSION_PUBKEY, &xonly));
+            if script {
+                println!("{}", hex::encode(chain::p2pk_script(&xonly)));
+            } else {
+                println!("{}", address::encode(network.prefix(), address::VERSION_PUBKEY, &xonly));
+            }
         }
         Cmd::Sign { registry, public, key_id, owner, path_owner, name, network, to, amount, utxo_amount, signers, out } => {
             let network = Network::parse(&network)?;
@@ -295,36 +402,8 @@ async fn main() -> Result<()> {
                 outputs: vec![TxOutput { address: to.clone(), amount }, TxOutput { address: from.clone(), amount: change }],
                 lock_time: 0,
             };
-            let t = client.registry.threshold as usize;
             println!("from   {from}\nto     {to}\namount {amount} sompi (change {change}, fee {fee})");
-
-            for idx in 0..tx.inputs.len() {
-                let mut pool: Vec<u16> = match &signers {
-                    Some(s) => s.split(',').map(|x| x.trim().parse()).collect::<std::result::Result<_, _>>()?,
-                    None => client.live_nodes().await,
-                };
-                let fixed = signers.is_some();
-                let sig = loop {
-                    // With an explicit signer set the request goes to the nodes as-is, so a
-                    // too-small set is refused by the nodes themselves rather than by this client.
-                    if !fixed && pool.len() < t {
-                        bail!("only {} usable signers ({pool:?}); threshold is {t}", pool.len());
-                    }
-                    let chosen: Vec<u16> = if fixed { pool.clone() } else { pool[..t].to_vec() };
-                    println!("input {idx}: signing with nodes {chosen:?}");
-                    match client.sign_once(&key_id, &path, &owner, &public, &tx, idx, &chosen).await? {
-                        Ok(sig) => break sig,
-                        Err(culprits) => {
-                            println!("input {idx}: invalid shares from {culprits:?} (identifiable abort) - excluding and retrying");
-                            if fixed {
-                                bail!("fixed signer set contains bad nodes {culprits:?}");
-                            }
-                            pool.retain(|id| !culprits.contains(id));
-                        }
-                    }
-                };
-                tx.inputs[idx].signature_script = hex::encode(chain::signature_script(&sig));
-            }
+            client.sign_inputs(&key_id, &path, &owner, &public, &mut tx, signers.as_deref()).await?;
             chain::verify_signed(&tx)?;
             println!(
                 "signature valid: {}",
@@ -333,6 +412,103 @@ async fn main() -> Result<()> {
             if let Some(out) = out {
                 std::fs::write(&out, serde_json::to_vec_pretty(&tx)?)?;
                 println!("signed tx -> {}", out.display());
+            }
+        }
+        Cmd::Balance { public, owner, name, network, api } => {
+            let network = Network::parse(&network)?;
+            let path = auth::owner_path(&load_owner(&owner)?.verifying_key(), &name);
+            let xonly = derive::child_xonly(load_public(&public)?.verifying_key(), &path)?;
+            let addr = address::encode(network.prefix(), address::VERSION_PUBKEY, &xonly);
+            let api = api::Api::new(network, api)?;
+            let utxos = api.utxos(&addr).await?;
+            let total: u64 = utxos.iter().map(|u| u.entry.amount).sum();
+            println!("address {addr}");
+            for u in &utxos {
+                let kind = if u.entry.is_coinbase { ", coinbase" } else { "" };
+                println!("  {}:{}  {} sompi  (DAA {}{kind})", u.outpoint.transaction_id, u.outpoint.index, u.entry.amount, u.entry.block_daa_score);
+            }
+            println!("balance {total} sompi ({} UTXOs) = {}", utxos.len(), coins(total));
+        }
+        Cmd::Send { registry, public, key_id, owner, name, network, to, amount, all, api, feerate, max_fee, signers, dry_run, out } => {
+            let network = Network::parse(&network)?;
+            let client = Client::new(Registry::load(&registry)?);
+            let public = load_public(&public)?;
+            let owner = load_owner(&owner)?;
+            let path = auth::owner_path(&owner.verifying_key(), &name);
+            let xonly = derive::child_xonly(public.verifying_key(), &path)?;
+            let own_script = chain::p2pk_script(&xonly);
+            let from = address::encode(network.prefix(), address::VERSION_PUBKEY, &xonly);
+            let api = api::Api::new(network, api)?;
+
+            let mut utxos = api.utxos(&from).await?;
+            utxos.retain(|u| {
+                u.entry.script_public_key.version == 0
+                    && hex::decode(&u.entry.script_public_key.script).map(|s| s == own_script).unwrap_or(false)
+            });
+            if network.is_hoosat() {
+                // HTND relays a spend only once its inputs are 1000 DAA old.
+                if let Some(daa) = api.virtual_daa_score().await {
+                    let before = utxos.len();
+                    utxos.retain(|u| u.entry.block_daa_score + 1000 <= daa);
+                    if utxos.len() < before {
+                        println!("skipping {} UTXO(s) younger than Hoosat's 1000-DAA minimum input age; retry shortly", before - utxos.len());
+                    }
+                }
+            }
+            let inputs: Vec<TxInput> = utxos
+                .iter()
+                .map(|u| TxInput {
+                    prev_txid: u.outpoint.transaction_id.clone(),
+                    index: u.outpoint.index,
+                    amount: u.entry.amount,
+                    script_pubkey: u.entry.script_public_key.script.clone(),
+                    sequence: 0,
+                    sig_op_count: 1,
+                    signature_script: String::new(),
+                })
+                .collect();
+            let feerate = match feerate {
+                Some(f) => f,
+                None => api.feerate().await.unwrap_or_else(|| api::fallback_feerate(network)),
+            };
+            let template = Tx { network, inputs: vec![], outputs: vec![], lock_time: 0 };
+            let amount = if all { Amount::All } else { Amount::Exact(amount.expect("clap enforces amount or --all")) };
+            let plan = build::build_payment(&template, inputs, &to, amount, &from, feerate)?;
+            if plan.fee > max_fee {
+                bail!("fee {} sompi exceeds --max-fee {max_fee} (fee rate {feerate} sompi/gram, mass {}); raise --max-fee or set --feerate", plan.fee, plan.mass);
+            }
+            let mut tx = plan.tx;
+            println!("from   {from}\nto     {to}");
+            println!(
+                "amount {} sompi, change {}, fee {} ({} grams at {feerate} sompi/gram), {} input(s)",
+                tx.outputs[0].amount,
+                plan.change,
+                plan.fee,
+                plan.mass,
+                tx.inputs.len()
+            );
+
+            client.sign_inputs(&key_id, &path, &owner, &public, &mut tx, signers.as_deref()).await?;
+            chain::verify_signed(&tx)?;
+            println!("signatures valid ({})", if network.is_hoosat() { "BIP340 over Hoosat sighash" } else { "Kaspa consensus script engine" });
+            if !network.is_hoosat() {
+                match api.server_mass(&tx).await {
+                    Ok(m) => println!("API mass check: {m} (local estimate {})", plan.mass),
+                    Err(e) => println!("API mass check unavailable: {e:#}"),
+                }
+            }
+            if let Some(out) = &out {
+                std::fs::write(out, serde_json::to_vec_pretty(&tx)?)?;
+                println!("signed tx -> {}", out.display());
+            }
+            if dry_run {
+                println!("dry run: not broadcast");
+            } else {
+                let txid = api.submit(&tx).await?;
+                println!("broadcast: {txid}");
+                if let Some(url) = api::explorer_tx_url(network, &txid).filter(|_| api.is_default) {
+                    println!("{url}");
+                }
             }
         }
         Cmd::Verify { tx } => {

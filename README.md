@@ -26,6 +26,7 @@ The demo starts 5 nodes (node 2 is deliberately byzantine), runs DKG, derives ad
 | 200 KAS (limit 100) | Nodes refuse (policy) |
 | Attacker signs for alice's path | Nodes refuse (owner signature) |
 | Only 2 signers | Nodes refuse (threshold) |
+| `tsn send` against a mock API (needs python3) | Picks 2 UTXOs, computes the fee, signs each input, "broadcasts" |
 
 ## What "valid" means here
 
@@ -34,17 +35,48 @@ The demo starts 5 nodes (node 2 is deliberately byzantine), runs DKG, derives ad
   feeds the transaction to HTND v2's own Go consensus code (address decoding, sighash, script engine).
 - Tampering with any output makes both checks fail.
 
-Transactions spend mock UTXOs, so nothing is broadcast. To go live, replace the mock input with a
-real UTXO of the derived address and submit the signed transaction to a node.
+The demo spends mock UTXOs and broadcasts nothing.
+
+## Real transactions
+
+No Kaspa or Hoosat node is needed. `tsn send` reads UTXOs from a public REST API and submits the
+signed transaction there. A lying API can't redirect funds: each input's signature commits to the
+UTXO's amount and script, so bad data only makes the transaction fail. A bad fee estimate could
+overpay miners, so `send` refuses fees above `--max-fee` (default 0.1 KAS/HTN).
+
+```bash
+./localnet.sh up                          # first run: 5 node keys + DKG in ./localnet, then starts the nodes
+./localnet.sh address kaspa-testnet       # fund this address (testnet-10 faucet)
+./localnet.sh balance kaspa-testnet
+./localnet.sh send kaspa-testnet --to kaspatest:... --amount 100000000 --dry-run   # sign + verify only
+./localnet.sh send kaspa-testnet --to kaspatest:... --amount 100000000             # broadcast
+./localnet.sh down
+```
+
+| Network | Default API | Notes |
+| --- | --- | --- |
+| `kaspa-testnet` (testnet-10) | `api-tn10.kaspa.org` | Fee rate from the API's estimate |
+| `kaspa-mainnet` | `api.kaspa.org` | Same |
+| `hoosat-mainnet` | `api.explorer-eu.hoosat.network` | No fee estimate; uses 2 sompi/gram (relay minimum is 1). Inputs must be 1000 DAA old before HTND relays a spend |
+| `hoosat-testnet` | none | Pass `--api <url>` |
+
+Amounts are in sompi (1 KAS or HTN = 100,000,000). `--all` sweeps the balance. Each node refuses
+to send more than 100 coins outside the key's own address per request (`--max-external-spend`).
+
+**`./localnet` holds the only copies of the key shares.** Deleting it, or losing 3 of the 5 node
+folders, loses every coin sent to its addresses. `demo.sh` uses a separate folder that it wipes on
+every run, so never send real funds to demo addresses.
 
 ## Layout
 
 ```
-crates/tsn-core   address encoding, sighash (Kaspa + Hoosat), derivation, sealing, owner auth, wire types
+crates/tsn-core   addresses, sighash and mass (Kaspa + Hoosat), coin selection, derivation, sealing, owner auth
 crates/tsn-node   signer node (axum HTTP): DKG rounds, commit, share
-crates/tsn-cli    `tsn`: registry, dkg, owner-new, address, sign, verify (coordinator is untrusted)
+crates/tsn-cli    `tsn`: registry, dkg, owner-new, address, balance, sign, send, verify (coordinator is untrusted)
 tools/hoosat-verify  Go program that validates a signed Hoosat tx with HTND's consensus engine
-demo.sh           end-to-end scenario
+tools/mock_api.py    offline stand-in for the REST API, used by demo.sh
+demo.sh           end-to-end scenario (throwaway keys)
+localnet.sh       persistent local network for real transactions
 ```
 
 ## Prototype shortcuts (not production)
@@ -54,12 +86,13 @@ demo.sh           end-to-end scenario
 - Registry is a local JSON file; production signs it (Phase 1) or puts it on-chain (Phase 3).
 - No nonce preprocessing pools, share refresh, or resharing yet (see design doc roadmap).
 - Only version-0, native-subnetwork, pay-to-pubkey (Schnorr) transactions with SIGHASH_ALL.
-- Not audited. Do not use with real funds.
+- All 5 nodes run on one machine in `localnet.sh`, so it has no real threshold security yet.
+- Not audited. Use only testnet funds or amounts you can afford to lose.
 
 ## Tests
 
 ```bash
-cargo test   # address vectors (vs kaspa-addresses and HTND), in-process DKG + signing on both chains
+cargo test   # address vectors, coin selection and fees, API parsing, in-process DKG + signing on both chains
 ```
 
 ## License

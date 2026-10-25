@@ -121,6 +121,23 @@ pub fn sighash(tx: &Tx, idx: usize) -> Result<[u8; 32]> {
     }
 }
 
+/// Mempools on both chains reject transactions heavier than this.
+pub const MAX_STANDARD_MASS: u64 = 100_000;
+
+/// Length of a P2PK Schnorr signature script (OP_DATA_65 + 64-byte sig + sighash type).
+const SIG_SCRIPT_LEN: usize = 66;
+
+/// Mass the mempool will charge for `tx` once signed (unsigned inputs are sized as if signed).
+/// Kaspa: max(compute, transient, storage) mass from rusty-kaspa's own calculator (KIP-9 included).
+/// Hoosat: HTND's v0 formula: size·1 + script-pubkey bytes·10 + sigops·1000.
+pub fn estimate_mass(tx: &Tx) -> Result<u64> {
+    if tx.network.is_hoosat() {
+        hoosat::mass(tx)
+    } else {
+        kaspa::mass(tx)
+    }
+}
+
 /// Total sent to scripts other than `own_script` (i.e. excluding change).
 pub fn external_spend(tx: &Tx, own_script: &[u8]) -> Result<u64> {
     let mut total = 0u64;
@@ -163,11 +180,20 @@ mod kaspa {
     };
 
     fn build(tx: &Tx) -> Result<(Transaction, Vec<UtxoEntry>)> {
+        build_with(tx, false)
+    }
+
+    /// `size_as_signed`: give unsigned inputs a placeholder signature script of the final length.
+    fn build_with(tx: &Tx, size_as_signed: bool) -> Result<(Transaction, Vec<UtxoEntry>)> {
         let mut inputs = Vec::new();
         let mut entries = Vec::new();
         for i in &tx.inputs {
             let outpoint = TransactionOutpoint::new(TransactionId::from_bytes(txid_bytes(&i.prev_txid)?), i.index);
-            let sig_script = if i.signature_script.is_empty() { vec![] } else { hex::decode(&i.signature_script)? };
+            let sig_script = match (i.signature_script.is_empty(), size_as_signed) {
+                (false, _) => hex::decode(&i.signature_script)?,
+                (true, true) => vec![0u8; SIG_SCRIPT_LEN],
+                (true, false) => vec![],
+            };
             inputs.push(TransactionInput::new(outpoint, sig_script, i.sequence, i.sig_op_count));
             let spk = ScriptPublicKey::new(0, hex::decode(&i.script_pubkey)?.into());
             entries.push(UtxoEntry::new(i.amount, spk, 0, false, None));
@@ -178,6 +204,19 @@ mod kaspa {
             outputs.push(TransactionOutput::new(o.amount, spk));
         }
         Ok((Transaction::new(0, inputs, outputs, tx.lock_time, SUBNETWORK_ID_NATIVE, 0, vec![]), entries))
+    }
+
+    pub fn mass(tx: &Tx) -> Result<u64> {
+        use kaspa_consensus_core::{config::params::MAINNET_PARAMS, mass::MassCalculator};
+        ensure!(tx.outputs.iter().all(|o| o.amount > 0), "zero-value output");
+        let (ktx, entries) = build_with(tx, true)?;
+        let calc = MassCalculator::new_with_consensus_params(&MAINNET_PARAMS);
+        let nc = calc.calc_non_contextual_masses(&ktx);
+        let storage = calc
+            .calc_contextual_masses(&PopulatedTransaction::new(&ktx, entries))
+            .map(|c| c.storage_mass)
+            .unwrap_or(u64::MAX);
+        Ok(nc.compute_mass.max(nc.transient_mass).max(storage))
     }
 
     pub fn sighash(tx: &Tx, idx: usize) -> Result<[u8; 32]> {
@@ -260,6 +299,25 @@ mod hoosat {
         h.update(&[0u8; 32]); // payload hash (native subnetwork)
         h.update(&[SIGHASH_ALL]);
         Ok(*h.finalize().as_bytes())
+    }
+
+    /// Mirrors HTND util/txmass for version-0 transactions with an empty payload.
+    pub fn mass(tx: &Tx) -> Result<u64> {
+        let mut size: u64 = 2 + 8; // version, input count
+        for i in &tx.inputs {
+            let sig_len = if i.signature_script.is_empty() { SIG_SCRIPT_LEN } else { i.signature_script.len() / 2 };
+            size += 32 + 4 + 8 + sig_len as u64 + 8; // outpoint, script length, script, sequence
+        }
+        size += 8; // output count
+        let mut spk_bytes = 0u64;
+        for o in &tx.outputs {
+            let script_len = script_for_address(tx.network, &o.address)?.len() as u64;
+            size += 8 + 2 + 8 + script_len; // value, script version, script length, script
+            spk_bytes += 2 + script_len;
+        }
+        size += 8 + 20 + 8 + 32 + 8; // lock time, subnetwork, gas, payload hash, payload length
+        let sigops: u64 = tx.inputs.iter().map(|i| i.sig_op_count as u64).sum();
+        Ok(size + spk_bytes * 10 + sigops * 1000)
     }
 
     pub fn verify(tx: &Tx) -> Result<()> {

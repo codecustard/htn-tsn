@@ -28,5 +28,5 @@ kaspa-txscript = "2.1"
 kaspa-addresses = "2.1"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 clap = { version = "4", features = ["derive"] }
